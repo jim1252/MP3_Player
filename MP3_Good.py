@@ -22,7 +22,7 @@ def add_song():
 	song_display.insert(END, song)
 	song_display.select_set(0)
 	
-#Add multiple songs to playlist
+#Add multiple songs to playlist at the same time
 def add_multiple():
 	songs = filedialog.askopenfilenames(initialdir='audio/', title="choose A Song", filetypes=(("mp3 Files", "*mp3"), ("m4a Files", "*.m4a"), ))
 	# Loop thru song list and replace directory info an MP3
