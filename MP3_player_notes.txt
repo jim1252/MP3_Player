@@ -1,0 +1,15 @@
+﻿Clone the repository:
+git clone https://github.com/jim1252/MP3_Player
+
+Create a virtual environment:
+python -m venv env
+source env/bin/activate
+
+install dependencies:
+pip install mutagen
+pip install pillow
+pip install pygame
+pip install eyed3
+
+run:
+python MP3_Dev.py
