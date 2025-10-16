@@ -137,8 +137,14 @@ def song_info(track):
 	composer = audio.tag.composer
 	#album_artist = audio.tag.album_artist
 	publisher = audio.tag.publisher
-	# try adding exception
-	genre = audio.tag.genre.name
+	try:
+		genre = audio.tag.genre.name
+		print('Genre: ', genre)
+
+	except AttributeError as e:
+		print('Genre in not present')
+		genre = 'None'
+	
 	song_mut = MP3(track)
 	song_length = song_mut.info.length
 	length = time.strftime('%H:%M:%S', time.gmtime(song_length))
