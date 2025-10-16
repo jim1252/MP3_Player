@@ -1,6 +1,8 @@
 ﻿Clone the repository:
 git clone https://github.com/jim1252/MP3_Player
 
+Create a file called audio in the same directory as the python file
+
 Create a virtual environment:
 python -m venv env
 source env/bin/activate
@@ -10,6 +12,8 @@ pip install mutagen
 pip install pillow
 pip install pygame
 pip install eyed3
+
+sudo apt-get install python3-tk
 
 run:
 python MP3_Dev.py

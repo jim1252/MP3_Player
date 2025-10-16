@@ -137,6 +137,7 @@ def song_info(track):
 	composer = audio.tag.composer
 	#album_artist = audio.tag.album_artist
 	publisher = audio.tag.publisher
+	# try adding exception
 	genre = audio.tag.genre.name
 	song_mut = MP3(track)
 	song_length = song_mut.info.length
