@@ -4,6 +4,8 @@ git clone https://github.com/jim1252/MP3_Player
 Create a file called audio in the same directory as the python file
 
 Create a virtual environment:
+if virtual enviroments need installing
+sudo apt install python3.12-venv
 python -m venv env
 source env/bin/activate
 

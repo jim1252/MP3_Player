@@ -380,11 +380,6 @@ shuffle_button.grid(row=0, column=5, padx=10)
 my_slider = ttk.Scale(master_frame, from_=0, to=100, orient=HORIZONTAL, value=0, command=slide, length=500)
 my_slider.grid(row=2, column=0, pady=10)
 
-#slider_label = Label(root, text="0")
-#slider_label.pack(pady=10)
-#mylabel = Label(root, text=shuf.get())
-#mylabel.pack()
-
 # Exit button at bottom of the screen
 button_quit = Button(root, text="Exit", bg="red", font=("Helvetica", 22), relief=RAISED, command=root.quit)
 button_quit.pack(pady=10)
