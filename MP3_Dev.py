@@ -14,269 +14,284 @@ root.title('My MP3')
 root.geometry("600x580")
 pygame.mixer.init()
 
-# Set global filepath to current location - Where Filedialog will start on first run
-global filepath
+# Folder the file dialog opens in. Starts as the current folder, then
+# remembers the last folder you added songs from.
 filepath = os.getcwd()
 
+# Full path of every song in the playlist, in the same order as the playlist box.
+# (Bug 3 fix: each song remembers its own folder, so you can mix folders.)
+playlist_paths = []
+
+# Position in the playlist of the song that is loaded (None = nothing loaded)
+current_index = None
+
+# Length of the loaded song in seconds
+song_length = 0
+
+# ID of the 1-second play_time timer, so it can be cancelled.
+# (Bug 1 fix: only ever one timer running, so the slider can't speed up.)
+timer_id = None
+
+stopped = True
+paused = False
+
+
+# ---------- Helpers ----------
+
+# "/home/pi/Music/Zombie.mp3" -> "Zombie"
+def song_name(path):
+	return os.path.splitext(os.path.basename(path))[0]
+
+# Read the ID3 tags for a song.
+# (Bug 5 fix: files with no tag, or missing fields, no longer crash.)
+def read_tags(path):
+	tags = {'title': None, 'artist': None, 'album': None, 'track': None,
+		'composer': None, 'publisher': None, 'genre': None}
+	try:
+		audio = eyed3.load(path)
+	except Exception as e:
+		print('Could not read tags:', e)
+		audio = None
+	if audio is not None and audio.tag is not None:
+		tag = audio.tag
+		tags['title'] = tag.title
+		tags['artist'] = tag.artist
+		tags['album'] = tag.album
+		if tag.track_num is not None and tag.track_num[0] is not None:
+			tags['track'] = tag.track_num[0]
+		tags['composer'] = tag.composer
+		tags['publisher'] = tag.publisher
+		if tag.genre is not None:
+			tags['genre'] = tag.genre.name
+	# No title in the tag? Use the file name instead
+	if not tags['title']:
+		tags['title'] = song_name(path)
+	return tags
+
+# Get the length of a song in seconds (0 if it can't be read)
+def get_length(path):
+	try:
+		return MP3(path).info.length
+	except Exception as e:
+		print('Could not read length:', e)
+		return 0
+
+# Highlight a song in the playlist box
+def highlight(index):
+	song_display.selection_clear(0, END)
+	song_display.activate(index)
+	song_display.selection_set(index)
+	song_display.see(index)
+
+# Start (or restart) the 1-second timer - cancels any timer already running
+def start_timer():
+	global timer_id
+	stop_timer()
+	timer_id = root.after(1000, play_time)
+
+def stop_timer():
+	global timer_id
+	if timer_id is not None:
+		root.after_cancel(timer_id)
+		timer_id = None
+
+
+# ---------- Adding / removing songs ----------
+
+def add_to_playlist(path):
+	playlist_paths.append(path)
+	song_display.insert(END, song_name(path))
+	# Highlight the first song if nothing is highlighted yet
+	if not song_display.curselection():
+		highlight(0)
+
 # Add song Function
-def add_song(path):
-	song = filedialog.askopenfilename(initialdir=(path), title="choose A Song", filetypes=(("mp3 Files", "*mp3"), ("m4a Files", "*.m4a"), ))
-	print ('Full Path: ' + song)
-	# Determine the filepath for the track
+# (Bug 4 fix: .m4a removed - pygame can't play them - and the filter now has its dot.)
+def add_song():
 	global filepath
-	filepath =song.rsplit('/',1)[0]
-	print (filepath)
-	song = song.replace(filepath, "")
-	song = song.replace(".mp3", "")	
-	# Insert song into playlist
-	song_display.insert(END, song)
-	song_display.select_set(0)
-	
+	song = filedialog.askopenfilename(initialdir=filepath, title="Choose A Song", filetypes=(("mp3 Files", "*.mp3"), ))
+	if not song:	# Cancel was pressed
+		return
+	print ('Full Path: ' + song)
+	filepath = os.path.dirname(song)
+	add_to_playlist(song)
+
 #Add multiple songs to playlist
-def add_multiple(path):
-	songs = filedialog.askopenfilenames(initialdir=(path), title="choose A Song", filetypes=(("mp3 Files", "*mp3"), ("m4a Files", "*.m4a"), ))
-	for song in songs :
-		# Determine the filepath for the track
-		global filepath
-		filepath =song.rsplit('/',1)[0]
-		# Loop thru song list and replace directory info an MP3
-		song = song.replace(filepath, "")
-		song = song.replace(".mp3", "")
-		# Insert into playlist
-		song_display.insert(END, song)
-		song_display.select_set(0)
-			
+def add_multiple():
+	global filepath
+	songs = filedialog.askopenfilenames(initialdir=filepath, title="Choose Songs", filetypes=(("mp3 Files", "*.mp3"), ))
+	for song in songs:
+		filepath = os.path.dirname(song)
+		add_to_playlist(song)
+
 # delete a song
 def delete_song():
+	selected = song_display.curselection()
+	if not selected:
+		return
+	index = selected[0]
 	stop()
-	song_display.delete(ANCHOR)
-	pygame.mixer.music.stop()	
-	
+	song_display.delete(index)
+	del playlist_paths[index]
+	current_song.config(text="")
+	song_info_label.config(text="No Song Selected")
+	if playlist_paths:
+		highlight(0)
+
 # Delete all songs from playlist
 def delete_all_songs():
 	stop()
 	song_display.delete(0, END)
-	pygame.mixer.music.stop()
+	playlist_paths.clear()
+	current_song.config(text="")
+	song_info_label.config(text="No Song Selected")
 
+
+# ---------- Playing ----------
+
+# Load and play the song at a position in the playlist.
+# Play, Next, Back, Shuffle and the end of a song all come through here.
+def play_index(index, start=0):
+	global current_index, song_length, stopped, paused
+	if index < 0 or index >= len(playlist_paths):
+		return
+	path = playlist_paths[index]
+	try:
+		pygame.mixer.music.load(path)
+		pygame.mixer.music.play(loops=0, start=start)
+	except pygame.error as e:
+		print('Could not play', path, e)
+		status_bar.config(text=f'Could not play {song_name(path)}  ')
+		return
+	current_index = index
+	stopped = False
+	paused = False
+	song_length = get_length(path)
+	converted_length = time.strftime('%H:%M:%S', time.gmtime(song_length))
+	my_slider.config(to=int(song_length), value=start)
+	status_bar.config(text=f'Time Elapsed: 00:00:00 of {converted_length}  ')
+	highlight(index)
+	tags = read_tags(path)
+	print("Play:", tags['title'])
+	current_song.config(text=tags['title'])
+	show_song_info(path, tags)
+	start_timer()
+
+# Called once a second while a song is playing to move the slider along
 def play_time():
+	global timer_id
+	timer_id = None
 	# if song is stopped cancels play_time loop
 	if stopped:
 		return
-	current_time = pygame.mixer.music.get_pos() / 1000
-	#slider_label.config(text=f'Slider: {int(my_slider.get())} and Song Pos: {int(current_time)}')
-	# get song title from song list
-	song = song_display.get(ACTIVE)
-	song = f'{filepath}{song}.mp3'
-	# Load Song with Mutagen
-	song_mut = MP3(song)
-	
-	# Get song Length
-	global song_length
-	song_length = song_mut.info.length
-	
-	# Convert to Time Format
 	converted_length = time.strftime('%H:%M:%S', time.gmtime(song_length))
-	
-	# increase current time by 1 second
-	current_time +=1
-	
-	if int(my_slider.get()) == int(song_length):
-		# Output time to status bar
-		status_bar.config(text=f'Time Elapsed: {converted_length} of {converted_length}  ' )
+
+	if paused:
+		pass
+	elif int(my_slider.get()) >= int(song_length):
+		# End of song - play the next one (or a random one if Shuffle is ticked)
+		status_bar.config(text=f'Time Elapsed: {converted_length} of {converted_length}  ')
 		shuffle()
-		
-	elif paused:
-		pass 
-		 
-	elif int(my_slider.get()) == int(current_time): #Slider hasn't been moved
-		# Update Slider To Positon
-		slider_position = int(song_length)
-		my_slider.config(to=slider_position, value=int(current_time))
-	else: #Slider has been moved!
-		
-		# Update Slider To Positon
-		slider_position = int(song_length)
-		my_slider.config(to=slider_position, value=int(my_slider.get()))
-		
-		# Convert to time format
-		converted_time = time.strftime('%H:%M:%S', time.gmtime(int(my_slider.get())))
-		
-		# Output time to status bar
-		status_bar.config(text=f'Time Elapsed: {converted_time} of {converted_length}  ' )
-		
-		# Movethis thing along by a second
-		next_time = int(my_slider.get()) +1
+		return	# play_index starts a fresh timer for the new song
+	else:
+		# Move the slider on by a second and show the time
+		next_time = int(my_slider.get()) + 1
 		my_slider.config(value=next_time)
-	
-	# Update time 
-	status_bar.after(1000, play_time)
+		converted_time = time.strftime('%H:%M:%S', time.gmtime(next_time))
+		status_bar.config(text=f'Time Elapsed: {converted_time} of {converted_length}  ')
 
-# Display current playing song 
-def song_playing(playing, filepath):
-	#Clear active bar in playlist box
-	song_display.selection_clear(0, END)
-	# Activate new song bar
-	song_display.activate(playing)
-	# Set Active bar to Next Song
-	song_display.selection_set(playing, last=None)
-	song = song_display.get(playing)
-	song = f'{filepath}{song}.mp3'	
-	audio=eyed3.load(song)
-	#print("Title:",audio.tag.title)
-	title = audio.tag.title
-	current_song.config(text=title)
-	
-#get the information for the playing song 	
-def song_info(track):
-	audio=eyed3.load(track)
-	#print("Title:",audio.tag.title)
-	title = audio.tag.title
-	artist = audio.tag.artist
-	album = audio.tag.album
-	album_track = audio.tag.track_num
-	composer = audio.tag.composer
-	#album_artist = audio.tag.album_artist
-	publisher = audio.tag.publisher
-	try:
-		genre = audio.tag.genre.name
-		print('Genre: ', genre)
+	# Check again in a second
+	start_timer()
 
-	except AttributeError as e:
-		print('Genre in not present')
-		genre = 'None'
-	
-	song_mut = MP3(track)
-	song_length = song_mut.info.length
-	length = time.strftime('%H:%M:%S', time.gmtime(song_length))
+# Show the info panel for a song
+def show_song_info(path, tags):
+	length = time.strftime('%H:%M:%S', time.gmtime(get_length(path)))
 	nl = '\n'
-	song_info_label.config(text=f'******* {nl} Title: {title} {nl} Duration: {length} {nl} Artist: {artist} {nl} Album: {album} {nl} Track: {album_track} {nl} Compiser: {composer} {nl} Publisher: {publisher} {nl} Genre; {genre} {nl} *******')	
-		
+	song_info_label.config(text=f'******* {nl} Title: {tags["title"]} {nl} Duration: {length} {nl} Artist: {tags["artist"]} {nl} Album: {tags["album"]} {nl} Track: {tags["track"]} {nl} Composer: {tags["composer"]} {nl} Publisher: {tags["publisher"]} {nl} Genre: {tags["genre"]} {nl} *******')
+
+# Clicking a song in the playlist shows its info (press Play to play it)
 def song_selected(event):
 	selected = song_display.curselection()
-	#Clear active bar in playlist box
-	song_display.selection_clear(0, END)
-	# Activate new song bar
-	song_display.activate(selected)
-	# Set Active bar to Next Song
-	song_display.selection_set(selected, last=None)
-	song = song_display.get(selected)
-	song = f'{filepath}{song}.mp3'
-	#song = f'/home/pi/tkinter/MP3_Player/audio/{song}.mp3'
-	print (song)
-	#Update song info label
-	song_info(song)
+	if not selected:
+		return
+	path = playlist_paths[selected[0]]
+	show_song_info(path, read_tags(path))
 
-# play selected song	
-def play(path):
-	global stopped
-	stopped = False
-	# Reset Slider and Status bar
-	status_bar.config(text='')
-	my_slider.config(value=0)
-	song = song_display.get(ACTIVE)
-	song = f'{path}{song}.mp3'
-	audio=eyed3.load(song)
-	print("Play:",audio.tag.title)
-	pygame.mixer.music.load(song)
-	pygame.mixer.music.play(loops=0)
-	global filepath
-	filepath = path
-	#get the current tuple number
-	playing = song_display.curselection()
-	song_playing(playing, filepath)
-	song_info(song)
-	play_time()
+# play selected song
+def play():
+	if not playlist_paths:
+		status_bar.config(text='Playlist is empty - add some songs  ')
+		return
+	selected = song_display.curselection()
+	if selected:
+		play_index(selected[0])
+	elif current_index is not None:
+		play_index(current_index)
+	else:
+		play_index(0)
 
 # Check status of shuffle check button
 def shuffle():
-	print ('Shuffle function Called')
 	if shuf.get() == 1:
-		print ('Shuffle')
-		# count number of songs in song_display ListBox
-		global total_songs
-		total_songs = song_display.size()
-		print (total_songs)		
 		shuffle_song()
 	else:
-		print ('next Song')
 		next_song()
 
-global stopped
-stopped = False		
-# Stop playing current song	
-
+# Stop playing current song
 def stop():
-	# Reset Slider and Status bar
-	status_bar.config(text='')
-	my_slider.config(value=0)
-	# Stop Song
+	global stopped, paused, current_index
+	stop_timer()
 	pygame.mixer.music.stop()
-	song_display.selection_clear(ACTIVE)
-	#Clear the status bar
-	status_bar.config(text='STOP')
-	# Set Stopped Variable to True
-	global stopped
 	stopped = True
-	song_display.select_set(0)
-	
-def next_song():
+	paused = False
+	current_index = None
 	# Reset Slider and Status bar
-	status_bar.config(text='')
 	my_slider.config(value=0)
-	#get the current tuple number
-	next_one = song_display.curselection()
-	# Add one to the current song number
-	next_one = next_one[0]+1
-	# get song title from song list
-	song = song_display.get(next_one)
-	song = f'{filepath}{song}.mp3'
-	pygame.mixer.music.load(song)
-	pygame.mixer.music.play(loops=0)	
-	song_playing(next_one, filepath)
-	song_info(song)
-	
-# Play previous song in playlist
-def previous_song():
-	# Reset Slider and Status bar
-	status_bar.config(text='')
-	my_slider.config(value=0)
-	#get the current tuple number
-	next_one = song_display.curselection()
-	# Add one to the current song number
-	next_one = next_one[0]-1
-	# get song title from song list
-	song = song_display.get(next_one)
-	song = f'{filepath}{song}.mp3'
-	pygame.mixer.music.load(song)
-	pygame.mixer.music.play(loops=0)
-	song_playing(next_one, filepath)
-	song_info(song)
- 
- #play random song in playlist
-def shuffle_song(): 
-	# Reset Slider and Status bar
-	status_bar.config(text='')
-	my_slider.config(value=0)
-	# Select random song
-	global random_song
-	random_song = randint(0, total_songs-1)
-	print (random_song)
-	# get song title from song list
-	song = song_display.get(random_song)
-	song = f'{filepath}{song}.mp3'
-	pygame.mixer.music.load(song)
-	pygame.mixer.music.play(loops=0)
-	song_playing(random_song, filepath)
-	song_info(song)	
- 
-# Create pause variable
-global paused
-paused = False
+	status_bar.config(text='STOP  ')
+	# Go back to the top of the playlist
+	if playlist_paths:
+		highlight(0)
 
-# Pause and unpause song	
-def pause(is_paused):
+# Play next song in playlist
+# (Bug 2 fix: after the last song, stop instead of crashing.)
+def next_song():
+	if current_index is None:
+		next_one = 0
+	else:
+		next_one = current_index + 1
+	if next_one >= len(playlist_paths):
+		stop()
+		status_bar.config(text='End of playlist  ')
+		return
+	play_index(next_one)
+
+# Play previous song in playlist
+# (Bug 2 fix: on the first song, Back restarts it instead of misbehaving.)
+def previous_song():
+	if not playlist_paths:
+		return
+	if current_index is None or current_index == 0:
+		play_index(0)
+	else:
+		play_index(current_index - 1)
+
+#play random song in playlist
+def shuffle_song():
+	total_songs = len(playlist_paths)
+	if total_songs == 0:
+		return
+	random_song = randint(0, total_songs - 1)
+	# Try not to play the same song twice in a row
+	if total_songs > 1:
+		while random_song == current_index:
+			random_song = randint(0, total_songs - 1)
+	play_index(random_song)
+
+# Pause and unpause song
+def pause():
 	global paused
-	paused = is_paused
+	if stopped:
+		return
 	if paused:
 		pygame.mixer.music.unpause()
 		paused = False
@@ -284,19 +299,26 @@ def pause(is_paused):
 		pygame.mixer.music.pause()
 		paused = True
 
+# Slider moved - jump to that point in the song
+# (Bug 6 fix: if paused, it jumps but stays paused.)
 def slide(x):
-	#slider_label.config(text=f'{int(my_slider.get())} of {int(song_length)}')
-	song = song_display.get(ACTIVE)
-	song = f'{filepath}{song}.mp3'
-	pygame.mixer.music.load(song)
-	pygame.mixer.music.play(loops=0, start=int(my_slider.get()))
-	
+	if stopped or current_index is None:
+		return
+	position = int(my_slider.get())
+	pygame.mixer.music.load(playlist_paths[current_index])
+	pygame.mixer.music.play(loops=0, start=position)
+	if paused:
+		pygame.mixer.music.pause()
+	converted_time = time.strftime('%H:%M:%S', time.gmtime(position))
+	converted_length = time.strftime('%H:%M:%S', time.gmtime(song_length))
+	status_bar.config(text=f'Time Elapsed: {converted_time} of {converted_length}  ')
+
 def volume(x):
 	pygame.mixer.music.set_volume(volume_slider.get())
 	# Get current volume
 	#current_volume = pygame.mixer.music.get_volume()
 	#slider_label.config(text=current_volume * 100)
-	
+
 # Create Menu Bar and cascades
 my_menu = Menu(root)
 root.config(menu=my_menu)
@@ -307,9 +329,9 @@ file_menu.add_command(label="Exit...", command=root.quit)
 #add Song Menu
 add_song_menu = Menu(my_menu)
 my_menu.add_cascade(label="Add Songs", menu=add_song_menu)
-add_song_menu.add_command(label="Add one Song to playlist", command=lambda: add_song(filepath))
+add_song_menu.add_command(label="Add one Song to playlist", command=add_song)
 # Add Multiple songs to playlist
-add_song_menu.add_command(label="Add multipule Songs to playlist", command=lambda: add_multiple(filepath))
+add_song_menu.add_command(label="Add multiple Songs to playlist", command=add_multiple)
 # Create Delete Song Menu
 remove_song_menu = Menu(my_menu)
 my_menu.add_cascade(label="Remove Songs", menu=remove_song_menu)
@@ -330,7 +352,7 @@ frame_song_display.grid(row=0, column=0)
 listbox_frame = Frame(frame_song_display)
 listbox_frame.grid(row=1, column=0)
 
-# Create Volume Label Frame 
+# Create Volume Label Frame
 volume_frame = LabelFrame(master_frame, text="Volume")
 volume_frame.grid(row=0, column=1, padx=0)
 
@@ -342,7 +364,7 @@ control_frame.grid(row=1, column=0, columnspan=2, pady=20)
 current_song = Label(frame_song_display, text="", bg="black", fg="green", width=31, font=("Helvetica", 22), relief=RAISED)
 current_song.grid(row=0, column=0, columnspan=2)
 scroll_song_display = Scrollbar(listbox_frame, orient=VERTICAL)
-song_display = Listbox(listbox_frame, bg="black", fg="green", width=35, height=11, relief=RAISED, yscrollcommand=scroll_song_display.set, selectbackground="red", selectforeground="black")
+song_display = Listbox(listbox_frame, bg="black", fg="green", width=35, height=11, relief=RAISED, yscrollcommand=scroll_song_display.set, selectbackground="red", selectforeground="black", exportselection=False)
 #Configure scrollbar
 scroll_song_display.config(command=song_display.yview)
 scroll_song_display.pack(side=RIGHT, fill=Y)
@@ -363,9 +385,9 @@ shuf = IntVar()
 
 # Set buttons
 back_button = Button(control_frame, image=back_img, borderwidth=0, command=previous_song)
-forward_button = Button(control_frame, image=forward_img, borderwidth=0, command=shuffle) 
-play_button = Button(control_frame, image=play_img, borderwidth=0, command=lambda: play(filepath))
-pause_button = Button(control_frame, image=pause_img, borderwidth=0, command=lambda: pause(paused))
+forward_button = Button(control_frame, image=forward_img, borderwidth=0, command=shuffle)
+play_button = Button(control_frame, image=play_img, borderwidth=0, command=play)
+pause_button = Button(control_frame, image=pause_img, borderwidth=0, command=pause)
 stop_button = Button(control_frame, image=stop_img, borderwidth=0, command=stop)
 shuffle_button = Checkbutton(control_frame, text="Shuffle", variable=shuf)
 
@@ -396,5 +418,5 @@ root.mainloop()
 
 '''Notes
 
-Note added to check 
+Note added to check
 '''
