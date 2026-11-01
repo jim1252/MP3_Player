@@ -11,7 +11,7 @@ import os
 
 root = Tk()
 root.title('My MP3')
-root.geometry("600x580")
+root.geometry("600x620")
 pygame.mixer.init()
 
 # Folder this script lives in - used to find the icons wherever you run it from
@@ -229,6 +229,11 @@ def play():
 def next_track(song_finished=False):
 	if not song_paths:
 		return
+	# Repeat Song - when a song finishes, play it again
+	# (the Forward button still moves on to the next song)
+	if song_finished and repeat_mode == REPEAT_SONG:
+		play_song(current_index)
+		return
 	if shuf.get() == 1:
 		play_song(randint(0, len(song_paths) - 1))
 		return
@@ -236,6 +241,10 @@ def next_track(song_finished=False):
 	next_one = 0 if pos is None else pos + 1
 	if next_one >= len(song_paths):
 		# Last song in the playlist
+		if repeat_mode == REPEAT_ALL:
+			# Go back to the start of the playlist
+			play_song(0)
+			return
 		if song_finished:
 			stop()
 			status_bar.config(text='End of playlist  ')
@@ -259,6 +268,18 @@ def stop():
 	# Reset Slider and Status bar
 	my_slider.config(value=0)
 	status_bar.config(text='STOP')
+
+# Repeat modes - the Repeat button cycles Off -> Repeat Song -> Repeat All -> Off
+REPEAT_OFF = 0
+REPEAT_SONG = 1
+REPEAT_ALL = 2
+repeat_labels = ['Repeat: Off', 'Repeat: Song', 'Repeat: All']
+repeat_mode = REPEAT_OFF
+
+def toggle_repeat():
+	global repeat_mode
+	repeat_mode = (repeat_mode + 1) % 3
+	repeat_button.config(text=repeat_labels[repeat_mode])
 
 # Pause and unpause song
 def pause():
@@ -353,14 +374,20 @@ forward_button = Button(control_frame, image=forward_img, borderwidth=0, command
 play_button = Button(control_frame, image=play_img, borderwidth=0, command=play)
 pause_button = Button(control_frame, image=pause_img, borderwidth=0, command=pause)
 stop_button = Button(control_frame, image=stop_img, borderwidth=0, command=stop)
-shuffle_button = Checkbutton(control_frame, text="Shuffle", variable=shuf)
+mode_frame = Frame(control_frame)
+mode_frame.grid(row=1, column=0, columnspan=5, pady=5)
+shuffle_button = Checkbutton(mode_frame, text="Shuffle", variable=shuf)
+# width keeps the button the same size whichever label it shows
+repeat_button = Button(mode_frame, text=repeat_labels[repeat_mode], width=12, command=toggle_repeat)
 
 back_button.grid(row= 0, column=0, padx=10)
 forward_button.grid(row= 0, column=1, padx=10)
 play_button.grid(row= 0, column=2, padx=10)
 pause_button.grid(row= 0, column=3, padx=10)
 stop_button.grid(row= 0, column=4, padx=10)
-shuffle_button.grid(row=0, column=5, padx=10)
+# Shuffle and Repeat sit on their own row under the controls so everything fits the window
+shuffle_button.pack(side=LEFT, padx=10)
+repeat_button.pack(side=LEFT, padx=10)
 
 # Create Music Position Slider
 my_slider = ttk.Scale(master_frame, from_=0, to=100, orient=HORIZONTAL, value=0, command=slide, length=500)
