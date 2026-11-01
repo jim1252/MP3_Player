@@ -1,2 +1,4 @@
 audio
 virt
+env/
+__pycache__/
