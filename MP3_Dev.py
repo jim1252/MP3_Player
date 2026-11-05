@@ -8,10 +8,11 @@ import tkinter.ttk as ttk
 from random import randint
 import eyed3
 import os
+from io import BytesIO
 
 root = Tk()
 root.title('My MP3')
-root.geometry("600x620")
+root.geometry("800x650")
 pygame.mixer.init()
 
 # Folder this script lives in - used to find the icons wherever you run it from
@@ -65,6 +66,7 @@ def add_multiple():
 def clear_song_labels():
 	current_song.config(text="")
 	song_info_label.config(text="No Song Selected")
+	show_album_art(None)
 
 # delete a song
 def delete_song():
@@ -165,12 +167,63 @@ def get_length(path):
 		print('Could not read length:', e)
 		return 0
 
+# Size the album art is shown at (pixels)
+ART_SIZE = 160
+# Picture files to look for in a song's folder when the MP3 has no art inside it
+COVER_FILES = ['cover.jpg', 'cover.png', 'folder.jpg', 'folder.png', 'front.jpg', 'front.png', 'albumart.jpg']
+
+# Find the album art for a song and return it as a Pillow image (None if there isn't any)
+def find_album_art(path):
+	# 1. Art stored inside the MP3's tags
+	try:
+		audio = eyed3.load(path)
+		if audio is not None and audio.tag is not None and len(audio.tag.images) > 0:
+			images = list(audio.tag.images)
+			# Use the front cover if the file says which one it is, otherwise the first picture
+			chosen = images[0]
+			for image in images:
+				# Picture type 3 is "front cover" in the ID3 standard
+				if image.picture_type == 3:
+					chosen = image
+					break
+			return Image.open(BytesIO(chosen.image_data))
+	except Exception as e:
+		print('Could not read album art from tags:', e)
+	# 2. A cover picture in the same folder as the song (any upper/lower case)
+	folder = os.path.dirname(path)
+	try:
+		files = {name.lower(): name for name in os.listdir(folder)}
+	except OSError:
+		files = {}
+	for cover in COVER_FILES:
+		if cover in files:
+			try:
+				return Image.open(os.path.join(folder, files[cover]))
+			except Exception as e:
+				print('Could not open', cover, e)
+	return None
+
+# Show a song's album art, or the music note picture if it hasn't got any
+def show_album_art(path):
+	img = find_album_art(path) if path else None
+	if img is None:
+		art = no_art_img
+	else:
+		# Shrink to fit the box, keeping the shape of the picture
+		img = img.convert('RGB')
+		img.thumbnail((ART_SIZE, ART_SIZE))
+		art = ImageTk.PhotoImage(img)
+	album_art_label.config(image=art)
+	# Keep a reference to the picture - without this Python throws it away and the label goes blank
+	album_art_label.image = art
+
 #get the information for the selected song
 def song_info(track):
 	tags = read_tags(track)
 	length = time.strftime('%H:%M:%S', time.gmtime(get_length(track)))
 	nl = '\n'
 	song_info_label.config(text=f'******* {nl} Title: {tags["title"]} {nl} Duration: {length} {nl} Artist: {tags["artist"]} {nl} Album: {tags["album"]} {nl} Track: {tags["track"]} {nl} Composer: {tags["composer"]} {nl} Publisher: {tags["publisher"]} {nl} Genre: {tags["genre"]} {nl} *******')
+	show_album_art(track)
 
 # Clicking a song in the playlist shows its info
 def song_selected(event):
@@ -302,7 +355,19 @@ def slide(x):
 	paused = False
 
 def volume(x):
-	pygame.mixer.music.set_volume(volume_slider.get())
+	level = float(volume_slider.get())
+	pygame.mixer.music.set_volume(level)
+	# Show the volume as a percentage under the slider
+	volume_level.config(text=f'{round(level * 100)}%')
+
+# Shuffle button switches between Off and On, like the Repeat button
+def toggle_shuffle():
+	if shuf.get() == 1:
+		shuf.set(0)
+		shuffle_button.config(text='Shuffle: Off')
+	else:
+		shuf.set(1)
+		shuffle_button.config(text='Shuffle: On')
 
 # Create Menu Bar and cascades
 my_menu = Menu(root)
@@ -337,9 +402,6 @@ frame_song_display.grid(row=0, column=0)
 listbox_frame = Frame(frame_song_display)
 listbox_frame.grid(row=1, column=0)
 
-# Create Volume Label Frame
-volume_frame = LabelFrame(master_frame, text="Volume")
-volume_frame.grid(row=0, column=1, padx=0)
 
 # Create Player control frame
 control_frame = Frame(master_frame, relief=RIDGE)
@@ -354,9 +416,18 @@ song_display = Listbox(listbox_frame, bg="black", fg="green", width=35, height=1
 scroll_song_display.config(command=song_display.yview)
 scroll_song_display.pack(side=RIGHT, fill=Y)
 song_display.pack()
-song_info_label = Label(frame_song_display, text="No Song Selected", bg="black", fg="green", width=25, height=11, relief=RAISED)
 song_display.bind("<<ListboxSelect>>", song_selected)
-song_info_label.grid(row=1, column=1)
+
+# Now playing panel - album art with the song info next to it
+info_frame = Frame(frame_song_display, bg="black", relief=RAISED, bd=1)
+info_frame.grid(row=1, column=1, sticky=N+S, padx=(5, 0))
+# Music note picture, shown when a song has no album art (enlarged to fill the art box)
+no_art_img = ImageTk.PhotoImage(Image.open(os.path.join(script_dir, 'icons', '1486505261-eighth-eighth-note-multimedia-player-music-note_81397.png')).convert('RGBA').resize((ART_SIZE, ART_SIZE)))
+album_art_label = Label(info_frame, image=no_art_img, bg="black", width=ART_SIZE, height=ART_SIZE)
+album_art_label.image = no_art_img
+album_art_label.grid(row=0, column=0, padx=5, pady=5)
+song_info_label = Label(info_frame, text="No Song Selected", bg="black", fg="green", width=25, height=11, justify=LEFT, anchor=W)
+song_info_label.grid(row=0, column=1, padx=5, pady=5)
 
 # Images for the control buttons
 back_img = PhotoImage(file=os.path.join(script_dir, 'icons', 'back.png'))
@@ -376,7 +447,7 @@ pause_button = Button(control_frame, image=pause_img, borderwidth=0, command=pau
 stop_button = Button(control_frame, image=stop_img, borderwidth=0, command=stop)
 mode_frame = Frame(control_frame)
 mode_frame.grid(row=1, column=0, columnspan=5, pady=5)
-shuffle_button = Checkbutton(mode_frame, text="Shuffle", variable=shuf)
+shuffle_button = Button(mode_frame, text='Shuffle: Off', width=12, command=toggle_shuffle)
 # width keeps the button the same size whichever label it shows
 repeat_button = Button(mode_frame, text=repeat_labels[repeat_mode], width=12, command=toggle_repeat)
 
@@ -402,8 +473,23 @@ status_bar = Label(root, text="", bd=1, relief=GROOVE, anchor=E)
 status_bar.pack(fill=X, side=BOTTOM, ipady=2)
 
 # Volume Slider
-volume_slider = ttk.Scale(volume_frame, from_=0, to=1, orient=VERTICAL, value=1, command=volume, length=175)
-volume_slider.pack(pady=10)
+# Volume sits to the right of the player controls.
+# from_=1 to=0 puts loud at the top, so pushing the slider up makes it louder.
+volume_frame = LabelFrame(control_frame, text="Volume")
+volume_frame.grid(row=0, column=5, rowspan=2, padx=(20, 0))
+volume_slider = ttk.Scale(volume_frame, from_=1, to=0, orient=VERTICAL, value=1, command=volume, length=100)
+volume_slider.grid(row=0, column=0, rowspan=2, padx=(8, 2), pady=5)
+# Loud speaker at the top and quiet speaker at the bottom show which way is which
+ICON_SIZE = 24
+vol_up_img = ImageTk.PhotoImage(Image.open(os.path.join(script_dir, 'icons', '1486485571-198high-loud-music-on-sound-speaker-volume_81180.png')).convert('RGBA').resize((ICON_SIZE, ICON_SIZE)))
+vol_down_img = ImageTk.PhotoImage(Image.open(os.path.join(script_dir, 'icons', '1486506271-music-mute-sound-volume-speaker-audio-player_81465.png')).convert('RGBA').resize((ICON_SIZE, ICON_SIZE)))
+vol_up_label = Label(volume_frame, image=vol_up_img)
+vol_up_label.grid(row=0, column=1, sticky=N, padx=(2, 8), pady=5)
+vol_down_label = Label(volume_frame, image=vol_down_img)
+vol_down_label.grid(row=1, column=1, sticky=S, padx=(2, 8), pady=5)
+# Current volume as a percentage
+volume_level = Label(volume_frame, text='100%')
+volume_level.grid(row=2, column=0, columnspan=2, pady=(0, 5))
 
 root.mainloop()
 
