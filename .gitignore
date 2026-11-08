@@ -2,3 +2,4 @@ audio
 virt
 env/
 __pycache__/
+settings.json

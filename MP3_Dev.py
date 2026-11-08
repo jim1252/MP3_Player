@@ -2,6 +2,7 @@ from tkinter import *
 from PIL import ImageTk,Image
 import pygame
 from tkinter import filedialog
+from tkinter import messagebox
 import time
 from mutagen.mp3 import MP3
 import tkinter.ttk as ttk
@@ -9,18 +10,71 @@ from random import randint
 import eyed3
 import os
 from io import BytesIO
+import json
 
 root = Tk()
 root.title('My MP3')
-root.geometry("800x650")
+root.geometry("800x760")
 pygame.mixer.init()
 
 # Folder this script lives in - used to find the icons wherever you run it from
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Where the file dialog opens - starts at the current folder,
+# Where the file dialog opens if no music folder is set - starts at the current folder,
 # then remembers the folder the last songs were added from
 last_folder = os.getcwd()
+
+# ---------------- Settings ----------------
+# Settings are kept in settings.json next to this script so they're remembered between runs
+settings_file = os.path.join(script_dir, 'settings.json')
+settings = {
+	'music_folder': '',     # where Add Songs opens ('' = not set)
+	'playlist_folder': '',  # where Open/Save Playlist opens ('' = not set)
+}
+
+def load_settings():
+	try:
+		with open(settings_file, 'r', encoding='utf-8') as f:
+			saved = json.load(f)
+		# Only take settings we know about, so an old or hand-edited file can't break anything
+		for key in settings:
+			if isinstance(saved.get(key), str):
+				settings[key] = saved[key]
+	except FileNotFoundError:
+		# First run - no settings saved yet
+		pass
+	except (OSError, ValueError) as e:
+		print('Could not read settings:', e)
+
+def save_settings():
+	try:
+		with open(settings_file, 'w', encoding='utf-8') as f:
+			json.dump(settings, f, indent=4)
+	except OSError as e:
+		messagebox.showerror('Settings', f"Couldn't save settings:\n{e}")
+
+# A folder from settings, if it's set and still exists (a USB stick might be unplugged)
+def setting_folder(key):
+	folder = settings[key]
+	if folder and os.path.isdir(folder):
+		return folder
+	return None
+
+# Where Add Songs opens: the music folder if set, otherwise wherever songs were last added from
+def music_start_folder():
+	return setting_folder('music_folder') or last_folder
+
+# Where Open/Save Playlist opens: the playlist folder if set,
+# otherwise the folder of the open playlist, otherwise wherever songs were last added from
+def playlist_start_folder():
+	folder = setting_folder('playlist_folder')
+	if folder:
+		return folder
+	if playlist_file:
+		return os.path.dirname(playlist_file)
+	return last_folder
+
+load_settings()
 
 # Full path of every song in the playlist, in the same order as the listbox.
 # The listbox only shows the song name; this list remembers where each file
@@ -34,6 +88,10 @@ stopped = True
 paused = False
 # ID of the scheduled play_time update, so only one timer ever runs
 timer_id = None
+# The playlist file that's open (None = a new playlist that hasn't been saved yet)
+playlist_file = None
+# True when songs have been added, removed or moved since the last save
+playlist_changed = False
 
 # Turn a full path into the name shown in the playlist
 def display_name(path):
@@ -43,6 +101,7 @@ def display_name(path):
 def add_to_playlist(path):
 	global last_folder
 	song_paths.append(path)
+	mark_changed()
 	song_display.insert(END, display_name(path))
 	last_folder = os.path.dirname(path)
 	# If nothing is selected yet, select the first song
@@ -51,14 +110,14 @@ def add_to_playlist(path):
 
 # Add song Function
 def add_song():
-	song = filedialog.askopenfilename(initialdir=last_folder, title="Choose A Song", filetypes=(("mp3 Files", "*.mp3"), ))
+	song = filedialog.askopenfilename(initialdir=music_start_folder(), title="Choose A Song", filetypes=(("mp3 Files", "*.mp3"), ))
 	# Pressing Cancel returns an empty string
 	if song:
 		add_to_playlist(song)
 
 #Add multiple songs to playlist
 def add_multiple():
-	songs = filedialog.askopenfilenames(initialdir=last_folder, title="Choose Songs", filetypes=(("mp3 Files", "*.mp3"), ))
+	songs = filedialog.askopenfilenames(initialdir=music_start_folder(), title="Choose Songs", filetypes=(("mp3 Files", "*.mp3"), ))
 	for song in songs:
 		add_to_playlist(song)
 
@@ -85,6 +144,7 @@ def delete_song():
 		current_index -= 1
 	song_display.delete(index)
 	del song_paths[index]
+	mark_changed()
 	if song_paths:
 		highlight(current_index if current_index is not None else min(index, len(song_paths) - 1))
 
@@ -92,6 +152,8 @@ def delete_song():
 def delete_all_songs():
 	global current_index
 	stop()
+	if song_paths:
+		mark_changed()
 	song_display.delete(0, END)
 	song_paths.clear()
 	current_index = None
@@ -369,13 +431,222 @@ def toggle_shuffle():
 		shuf.set(1)
 		shuffle_button.config(text='Shuffle: On')
 
+# ---------------- Playlists ----------------
+# Playlists are saved as .m3u files - a plain text file with one song per line.
+# VLC, Windows Media Player and most other players can open them too.
+
+# Show the playlist name in the window title, with a * if it has unsaved changes
+def update_title():
+	name = display_name(playlist_file) if playlist_file else 'New Playlist'
+	star = ' *' if playlist_changed else ''
+	root.title(f'My MP3 - {name}{star}')
+
+def mark_changed():
+	global playlist_changed
+	playlist_changed = True
+	update_title()
+
+# Before throwing the current playlist away, offer to save it.
+# Returns True if it's OK to carry on, False if the user pressed Cancel.
+def ok_to_discard():
+	if not playlist_changed or not song_paths:
+		return True
+	answer = messagebox.askyesnocancel('Save Playlist', 'Save changes to the playlist first?')
+	if answer is None:
+		# Cancel
+		return False
+	if answer:
+		# Yes - only carry on if it actually got saved
+		return save_playlist()
+	# No - carry on without saving
+	return True
+
+# Write the playlist to a file
+def write_playlist(path):
+	with open(path, 'w', encoding='utf-8') as f:
+		f.write('#EXTM3U\n')
+		for song in song_paths:
+			tags = read_tags(song)
+			# #EXTINF holds the length and name so other players can show them without reading the song
+			f.write(f'#EXTINF:{int(get_length(song))},{tags["artist"]} - {tags["title"]}\n')
+			f.write(song + '\n')
+
+# Save As - always asks for a file name
+def save_playlist_as():
+	global playlist_file, playlist_changed
+	if not song_paths:
+		status_bar.config(text='Playlist is empty - nothing to save  ')
+		return False
+	path = filedialog.asksaveasfilename(initialdir=playlist_start_folder(), title='Save Playlist As', defaultextension='.m3u', filetypes=(('Playlists', '*.m3u *.m3u8'), ))
+	# Pressing Cancel returns an empty string
+	if not path:
+		return False
+	try:
+		write_playlist(path)
+	except OSError as e:
+		messagebox.showerror('Save Playlist', f"Couldn't save the playlist:\n{e}")
+		return False
+	playlist_file = path
+	playlist_changed = False
+	update_title()
+	status_bar.config(text=f'Saved {display_name(path)}  ')
+	return True
+
+# Save - uses the current file name, or asks for one if it's a new playlist
+def save_playlist():
+	global playlist_changed
+	if playlist_file is None:
+		return save_playlist_as()
+	if not song_paths:
+		status_bar.config(text='Playlist is empty - nothing to save  ')
+		return False
+	try:
+		write_playlist(playlist_file)
+	except OSError as e:
+		messagebox.showerror('Save Playlist', f"Couldn't save the playlist:\n{e}")
+		return False
+	playlist_changed = False
+	update_title()
+	status_bar.config(text=f'Saved {display_name(playlist_file)}  ')
+	return True
+
+# Read the song paths out of a playlist file
+def read_playlist(path):
+	folder = os.path.dirname(path)
+	songs = []
+	missing = 0
+	# utf-8-sig copes with files saved by Windows programs that add a marker at the start
+	with open(path, 'r', encoding='utf-8-sig', errors='replace') as f:
+		for line in f:
+			line = line.strip()
+			# Skip blank lines and #comment lines like #EXTM3U and #EXTINF
+			if not line or line.startswith('#'):
+				continue
+			# Playlists made by other programs sometimes use paths relative to the playlist's folder
+			if not os.path.isabs(line):
+				line = os.path.join(folder, line)
+			line = os.path.normpath(line)
+			if os.path.isfile(line):
+				songs.append(line)
+			else:
+				print('Missing from playlist:', line)
+				missing += 1
+	return songs, missing
+
+# Open a playlist - replaces the songs that are in the list now
+def open_playlist():
+	global playlist_file, playlist_changed, current_index
+	if not ok_to_discard():
+		return
+	path = filedialog.askopenfilename(initialdir=playlist_start_folder(), title='Open Playlist', filetypes=(('Playlists', '*.m3u *.m3u8'), ))
+	if not path:
+		return
+	try:
+		songs, missing = read_playlist(path)
+	except OSError as e:
+		messagebox.showerror('Open Playlist', f"Couldn't open the playlist:\n{e}")
+		return
+	# Empty the current list, then fill it from the file
+	stop()
+	song_display.delete(0, END)
+	song_paths.clear()
+	current_index = None
+	clear_song_labels()
+	for song in songs:
+		add_to_playlist(song)
+	playlist_file = path
+	# Songs that couldn't be found are dropped, so the playlist has changed from what's in the file
+	playlist_changed = missing > 0
+	update_title()
+	if missing:
+		status_bar.config(text=f'Opened {display_name(path)} - {missing} song(s) could not be found  ')
+	else:
+		status_bar.config(text=f'Opened {display_name(path)} - {len(songs)} songs  ')
+
+# Start a new, empty playlist
+def new_playlist():
+	global playlist_file, playlist_changed
+	if not ok_to_discard():
+		return
+	delete_all_songs()
+	playlist_file = None
+	playlist_changed = False
+	update_title()
+
+# Move the selected song up (-1) or down (+1) the playlist
+def move_song(direction):
+	global current_index
+	selected = song_display.curselection()
+	if not selected:
+		return
+	index = selected[0]
+	new_index = index + direction
+	if new_index < 0 or new_index >= len(song_paths):
+		# Already at the top or bottom
+		return
+	# Swap the two songs in the list of paths...
+	song_paths[index], song_paths[new_index] = song_paths[new_index], song_paths[index]
+	# ...and in the listbox
+	song_display.delete(index)
+	song_display.insert(new_index, display_name(song_paths[new_index]))
+	# Keep track of the playing song if it was one of the two that swapped
+	if current_index == index:
+		current_index = new_index
+	elif current_index == new_index:
+		current_index = index
+	highlight(new_index)
+	mark_changed()
+
+def move_up():
+	move_song(-1)
+
+def move_down():
+	move_song(1)
+
+# File > Settings - pick a folder and remember it
+def choose_folder(key, title):
+	current = setting_folder(key) or os.path.expanduser('~')
+	folder = filedialog.askdirectory(initialdir=current, title=title, mustexist=True)
+	# Pressing Cancel returns an empty string (or an empty tuple on some systems)
+	if not folder:
+		return
+	settings[key] = folder
+	save_settings()
+	status_bar.config(text=f'{title}: {folder}  ')
+
+def set_music_folder():
+	choose_folder('music_folder', 'Music Folder')
+
+def set_playlist_folder():
+	choose_folder('playlist_folder', 'Playlist Folder')
+
+# Closing the window or pressing Exit - offer to save first
+def exit_player():
+	if ok_to_discard():
+		root.quit()
+
 # Create Menu Bar and cascades
 my_menu = Menu(root)
 root.config(menu=my_menu)
 #add file menu
 file_menu = Menu(my_menu)
 my_menu.add_cascade(label="File", menu=file_menu)
-file_menu.add_command(label="Exit...", command=root.quit)
+settings_menu = Menu(file_menu)
+file_menu.add_cascade(label="Settings", menu=settings_menu)
+settings_menu.add_command(label="Set Music Folder...", command=set_music_folder)
+settings_menu.add_command(label="Set Playlist Folder...", command=set_playlist_folder)
+file_menu.add_separator()
+file_menu.add_command(label="Exit...", command=exit_player)
+# Playlist menu - save and open playlists
+playlist_menu = Menu(my_menu)
+my_menu.add_cascade(label="Playlist", menu=playlist_menu)
+playlist_menu.add_command(label="New Playlist", command=new_playlist)
+playlist_menu.add_command(label="Open Playlist...", command=open_playlist, accelerator="Ctrl+O")
+playlist_menu.add_command(label="Save Playlist", command=save_playlist, accelerator="Ctrl+S")
+playlist_menu.add_command(label="Save Playlist As...", command=save_playlist_as)
+playlist_menu.add_separator()
+playlist_menu.add_command(label="Move Song Up", command=move_up)
+playlist_menu.add_command(label="Move Song Down", command=move_down)
 #add Song Menu
 add_song_menu = Menu(my_menu)
 my_menu.add_cascade(label="Add Songs", menu=add_song_menu)
@@ -417,6 +688,14 @@ scroll_song_display.config(command=song_display.yview)
 scroll_song_display.pack(side=RIGHT, fill=Y)
 song_display.pack()
 song_display.bind("<<ListboxSelect>>", song_selected)
+
+# Move Up / Move Down buttons under the playlist
+move_frame = Frame(frame_song_display)
+move_frame.grid(row=2, column=0, pady=(5, 0))
+move_up_button = Button(move_frame, text='Move Up', width=10, command=move_up)
+move_up_button.pack(side=LEFT, padx=5)
+move_down_button = Button(move_frame, text='Move Down', width=10, command=move_down)
+move_down_button.pack(side=LEFT, padx=5)
 
 # Now playing panel - album art with the song info next to it
 info_frame = Frame(frame_song_display, bg="black", relief=RAISED, bd=1)
@@ -465,7 +744,7 @@ my_slider = ttk.Scale(master_frame, from_=0, to=100, orient=HORIZONTAL, value=0,
 my_slider.grid(row=2, column=0, pady=10)
 
 # Exit button at bottom of the screen
-button_quit = Button(root, text="Exit", bg="red", font=("Helvetica", 22), relief=RAISED, command=root.quit)
+button_quit = Button(root, text="Exit", bg="red", font=("Helvetica", 22), relief=RAISED, command=exit_player)
 button_quit.pack(pady=10)
 
 # Create status bar
@@ -490,6 +769,12 @@ vol_down_label.grid(row=1, column=1, sticky=S, padx=(2, 8), pady=5)
 # Current volume as a percentage
 volume_level = Label(volume_frame, text='100%')
 volume_level.grid(row=2, column=0, columnspan=2, pady=(0, 5))
+
+# Keyboard shortcuts and the window's close (X) button
+root.bind('<Control-s>', lambda event: save_playlist())
+root.bind('<Control-o>', lambda event: open_playlist())
+root.protocol('WM_DELETE_WINDOW', exit_player)
+update_title()
 
 root.mainloop()
 
