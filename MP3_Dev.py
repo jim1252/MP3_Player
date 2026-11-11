@@ -11,10 +11,11 @@ import eyed3
 import os
 from io import BytesIO
 import json
+from visualiser import Visualiser
 
 root = Tk()
 root.title('My MP3')
-root.geometry("800x760")
+root.geometry("800x890")
 pygame.mixer.init()
 
 # Folder this script lives in - used to find the icons wherever you run it from
@@ -88,6 +89,9 @@ stopped = True
 paused = False
 # ID of the scheduled play_time update, so only one timer ever runs
 timer_id = None
+# Where in the song (seconds) playback last started from - 0, or wherever the slider was dragged to.
+# pygame only says how long it's been playing since then, so we add the two together.
+seek_offset = 0
 # The playlist file that's open (None = a new playlist that hasn't been saved yet)
 playlist_file = None
 # True when songs have been added, removed or moved since the last save
@@ -297,7 +301,7 @@ def song_selected(event):
 
 # Load and play the song at a position in the playlist - everything that plays a song uses this
 def play_song(index):
-	global current_index, song_length, stopped, paused, timer_id
+	global current_index, song_length, stopped, paused, timer_id, seek_offset
 	if index is None or index < 0 or index >= len(song_paths):
 		return
 	path = song_paths[index]
@@ -312,6 +316,8 @@ def play_song(index):
 	current_index = index
 	stopped = False
 	paused = False
+	seek_offset = 0
+	visualiser.load(path)
 	song_length = get_length(path)
 	# Reset Slider and Status bar
 	my_slider.config(to=max(int(song_length), 1), value=0)
@@ -322,6 +328,15 @@ def play_song(index):
 	# Make sure only one timer is running, then start it
 	cancel_timer()
 	timer_id = root.after(1000, play_time)
+
+# How far through the song we are, in seconds (None when stopped or paused) - used by the visualiser
+def song_position():
+	if stopped or paused:
+		return None
+	ms = pygame.mixer.music.get_pos()
+	if ms < 0:
+		return None
+	return seek_offset + ms / 1000
 
 # Where we are in the playlist: the song that's loaded, otherwise the selected one
 def position():
@@ -410,10 +425,11 @@ def pause():
 
 # Dragging the slider jumps to that point in the song
 def slide(x):
-	global paused
+	global paused, seek_offset
 	if stopped or current_index is None:
 		return
-	pygame.mixer.music.play(loops=0, start=int(my_slider.get()))
+	seek_offset = int(my_slider.get())
+	pygame.mixer.music.play(loops=0, start=seek_offset)
 	paused = False
 
 def volume(x):
@@ -742,6 +758,10 @@ repeat_button.pack(side=LEFT, padx=10)
 # Create Music Position Slider
 my_slider = ttk.Scale(master_frame, from_=0, to=100, orient=HORIZONTAL, value=0, command=slide, length=500)
 my_slider.grid(row=2, column=0, pady=10)
+
+# Music visualiser - bars that bounce along to the song, under the slider
+visualiser = Visualiser(master_frame, song_position, width=500, height=110)
+visualiser.grid(row=3, column=0, pady=(0, 5))
 
 # Exit button at bottom of the screen
 button_quit = Button(root, text="Exit", bg="red", font=("Helvetica", 22), relief=RAISED, command=exit_player)
