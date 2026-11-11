@@ -12,10 +12,11 @@ import os
 from io import BytesIO
 import json
 from visualiser import Visualiser
+from tooltip import Tooltip
 
 root = Tk()
 root.title('My MP3')
-root.geometry("800x890")
+root.geometry("800x850")
 pygame.mixer.init()
 
 # Folder this script lives in - used to find the icons wherever you run it from
@@ -409,7 +410,7 @@ repeat_mode = REPEAT_OFF
 def toggle_repeat():
 	global repeat_mode
 	repeat_mode = (repeat_mode + 1) % 3
-	repeat_button.config(text=repeat_labels[repeat_mode])
+	repeat_button.config(image=repeat_imgs[repeat_mode])
 
 # Pause and unpause song
 def pause():
@@ -432,6 +433,35 @@ def slide(x):
 	pygame.mixer.music.play(loops=0, start=seek_offset)
 	paused = False
 
+# Skip buttons - jump back (-10) or forward (+10) seconds in the song
+SKIP_SECONDS = 10
+
+def skip(seconds):
+	global seek_offset
+	if stopped or current_index is None:
+		return
+	new_time = int(my_slider.get()) + seconds
+	if new_time >= int(song_length):
+		# Skipped past the end - move on as if the song had finished
+		next_track(song_finished=True)
+		return
+	new_time = max(0, new_time)
+	seek_offset = new_time
+	pygame.mixer.music.play(loops=0, start=new_time)
+	if paused:
+		# Stay paused if we were paused - it just waits at the new point
+		pygame.mixer.music.pause()
+	my_slider.config(value=new_time)
+	converted_time = time.strftime('%H:%M:%S', time.gmtime(new_time))
+	converted_length = time.strftime('%H:%M:%S', time.gmtime(song_length))
+	status_bar.config(text=f'Time Elapsed: {converted_time} of {converted_length}  ')
+
+def skip_back():
+	skip(-SKIP_SECONDS)
+
+def skip_forward():
+	skip(SKIP_SECONDS)
+
 def volume(x):
 	level = float(volume_slider.get())
 	pygame.mixer.music.set_volume(level)
@@ -442,10 +472,10 @@ def volume(x):
 def toggle_shuffle():
 	if shuf.get() == 1:
 		shuf.set(0)
-		shuffle_button.config(text='Shuffle: Off')
+		shuffle_button.config(image=shuffle_off_img)
 	else:
 		shuf.set(1)
-		shuffle_button.config(text='Shuffle: On')
+		shuffle_button.config(image=shuffle_on_img)
 
 # ---------------- Playlists ----------------
 # Playlists are saved as .m3u files - a plain text file with one song per line.
@@ -712,6 +742,8 @@ move_up_button = Button(move_frame, text='Move Up', width=10, command=move_up)
 move_up_button.pack(side=LEFT, padx=5)
 move_down_button = Button(move_frame, text='Move Down', width=10, command=move_down)
 move_down_button.pack(side=LEFT, padx=5)
+Tooltip(move_up_button, 'Move the selected song up the playlist')
+Tooltip(move_down_button, 'Move the selected song down the playlist')
 
 # Now playing panel - album art with the song info next to it
 info_frame = Frame(frame_song_display, bg="black", relief=RAISED, bd=1)
@@ -724,44 +756,61 @@ album_art_label.grid(row=0, column=0, padx=5, pady=5)
 song_info_label = Label(info_frame, text="No Song Selected", bg="black", fg="green", width=25, height=11, justify=LEFT, anchor=W)
 song_info_label.grid(row=0, column=1, padx=5, pady=5)
 
-# Images for the control buttons
-back_img = PhotoImage(file=os.path.join(script_dir, 'icons', 'back.png'))
-forward_img = PhotoImage(file=os.path.join(script_dir, 'icons', 'forward.png'))
-play_img = PhotoImage(file=os.path.join(script_dir, 'icons', 'play.png'))
-pause_img = PhotoImage(file=os.path.join(script_dir, 'icons', 'pause.png'))
-stop_img = PhotoImage(file=os.path.join(script_dir, 'icons', 'stop.png'))
+# Images for the control buttons - all drawn by make_icons.py so they match
+def button_image(name):
+	return PhotoImage(file=os.path.join(script_dir, 'icons', f'btn_{name}.png'))
+
+previous_img = button_image('previous')
+back10_img = button_image('back10')
+play_img = button_image('play')
+pause_img = button_image('pause')
+stop_img = button_image('stop')
+forward10_img = button_image('forward10')
+next_img = button_image('next')
+shuffle_off_img = button_image('shuffle_off')
+shuffle_on_img = button_image('shuffle_on')
+# In the same order as REPEAT_OFF, REPEAT_SONG, REPEAT_ALL
+repeat_imgs = [button_image('repeat_off'), button_image('repeat_song'), button_image('repeat_all')]
 
 #global shuf to set shuffle status as a int Variable
 shuf = IntVar()
 
-# Set buttons
-back_button = Button(control_frame, image=back_img, borderwidth=0, command=previous_song)
-forward_button = Button(control_frame, image=forward_img, borderwidth=0, command=next_track)
-play_button = Button(control_frame, image=play_img, borderwidth=0, command=play)
-pause_button = Button(control_frame, image=pause_img, borderwidth=0, command=pause)
-stop_button = Button(control_frame, image=stop_img, borderwidth=0, command=stop)
-mode_frame = Frame(control_frame)
-mode_frame.grid(row=1, column=0, columnspan=5, pady=5)
-shuffle_button = Button(mode_frame, text='Shuffle: Off', width=12, command=toggle_shuffle)
-# width keeps the button the same size whichever label it shows
-repeat_button = Button(mode_frame, text=repeat_labels[repeat_mode], width=12, command=toggle_repeat)
-
-back_button.grid(row= 0, column=0, padx=10)
-forward_button.grid(row= 0, column=1, padx=10)
-play_button.grid(row= 0, column=2, padx=10)
-pause_button.grid(row= 0, column=3, padx=10)
-stop_button.grid(row= 0, column=4, padx=10)
-# Shuffle and Repeat sit on their own row under the controls so everything fits the window
-shuffle_button.pack(side=LEFT, padx=10)
-repeat_button.pack(side=LEFT, padx=10)
+# All the control buttons on one line, left to right, each with its tooltip
+# (the tooltip text can be a function so Shuffle and Repeat say what they're set to now)
+buttons = [
+	(previous_img, previous_song, 'Previous song'),
+	(back10_img, skip_back, f'Back {SKIP_SECONDS} seconds'),
+	(play_img, play, 'Play'),
+	(pause_img, pause, 'Pause / Resume'),
+	(stop_img, stop, 'Stop'),
+	(forward10_img, skip_forward, f'Forward {SKIP_SECONDS} seconds'),
+	(next_img, next_track, 'Next song'),
+	(shuffle_off_img, toggle_shuffle, lambda: 'Shuffle: On' if shuf.get() == 1 else 'Shuffle: Off'),
+	(repeat_imgs[repeat_mode], toggle_repeat, lambda: repeat_labels[repeat_mode]),
+]
+made = []
+for column, (image, action, tip) in enumerate(buttons):
+	button = Button(control_frame, image=image, borderwidth=0, highlightthickness=0, command=action)
+	# Stop a grey square appearing behind the button when the mouse is over it
+	button.config(activebackground=button.cget('background'))
+	# A bigger gap before Shuffle and Repeat to set them apart from the playing controls
+	button.grid(row=0, column=column, padx=(25 if column == 7 else 6, 6))
+	Tooltip(button, tip)
+	made.append(button)
+(back_button, back10_button, play_button, pause_button, stop_button,
+	forward10_button, forward_button, shuffle_button, repeat_button) = made
 
 # Create Music Position Slider
 my_slider = ttk.Scale(master_frame, from_=0, to=100, orient=HORIZONTAL, value=0, command=slide, length=500)
 my_slider.grid(row=2, column=0, pady=10)
 
-# Music visualiser - bars that bounce along to the song, under the slider
-visualiser = Visualiser(master_frame, song_position, width=500, height=110)
-visualiser.grid(row=3, column=0, pady=(0, 5))
+# Visualiser and volume side by side under the slider
+bottom_frame = Frame(master_frame)
+bottom_frame.grid(row=3, column=0, pady=(0, 5))
+
+# Music visualiser - bars that bounce along to the song
+visualiser = Visualiser(bottom_frame, song_position, width=500, height=150)
+visualiser.grid(row=0, column=0)
 
 # Exit button at bottom of the screen
 button_quit = Button(root, text="Exit", bg="red", font=("Helvetica", 22), relief=RAISED, command=exit_player)
@@ -772,16 +821,15 @@ status_bar = Label(root, text="", bd=1, relief=GROOVE, anchor=E)
 status_bar.pack(fill=X, side=BOTTOM, ipady=2)
 
 # Volume Slider
-# Volume sits to the right of the player controls.
+# Volume sits to the right of the visualiser.
 # from_=1 to=0 puts loud at the top, so pushing the slider up makes it louder.
-volume_frame = LabelFrame(control_frame, text="Volume")
-volume_frame.grid(row=0, column=5, rowspan=2, padx=(20, 0))
+volume_frame = LabelFrame(bottom_frame, text="Volume")
+volume_frame.grid(row=0, column=1, sticky=N+S, padx=(15, 0))
 volume_slider = ttk.Scale(volume_frame, from_=1, to=0, orient=VERTICAL, value=1, command=volume, length=100)
 volume_slider.grid(row=0, column=0, rowspan=2, padx=(8, 2), pady=5)
 # Loud speaker at the top and quiet speaker at the bottom show which way is which
-ICON_SIZE = 24
-vol_up_img = ImageTk.PhotoImage(Image.open(os.path.join(script_dir, 'icons', '1486485571-198high-loud-music-on-sound-speaker-volume_81180.png')).convert('RGBA').resize((ICON_SIZE, ICON_SIZE)))
-vol_down_img = ImageTk.PhotoImage(Image.open(os.path.join(script_dir, 'icons', '1486506271-music-mute-sound-volume-speaker-audio-player_81465.png')).convert('RGBA').resize((ICON_SIZE, ICON_SIZE)))
+vol_up_img = button_image('volume_up')
+vol_down_img = button_image('volume_down')
 vol_up_label = Label(volume_frame, image=vol_up_img)
 vol_up_label.grid(row=0, column=1, sticky=N, padx=(2, 8), pady=5)
 vol_down_label = Label(volume_frame, image=vol_down_img)
@@ -789,6 +837,7 @@ vol_down_label.grid(row=1, column=1, sticky=S, padx=(2, 8), pady=5)
 # Current volume as a percentage
 volume_level = Label(volume_frame, text='100%')
 volume_level.grid(row=2, column=0, columnspan=2, pady=(0, 5))
+Tooltip(volume_slider, lambda: f'Volume {volume_level.cget("text")}')
 
 # Keyboard shortcuts and the window's close (X) button
 root.bind('<Control-s>', lambda event: save_playlist())
