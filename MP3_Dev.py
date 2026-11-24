@@ -32,16 +32,29 @@ settings_file = os.path.join(script_dir, 'settings.json')
 settings = {
 	'music_folder': '',     # where Add Songs opens ('' = not set)
 	'playlist_folder': '',  # where Open/Save Playlist opens ('' = not set)
+	# The rest are saved when the player closes, so it starts up the way you left it
+	'volume': 1.0,          # volume slider, 0.0 to 1.0
+	'muted': False,
+	'shuffle': False,
+	'repeat': 0,            # REPEAT_OFF, REPEAT_SONG or REPEAT_ALL
+	'last_playlist': '',    # the playlist file that was open ('' = none)
+	'last_song': -1,        # position in that playlist of the song that was loaded (-1 = none)
+	'last_position': 0,     # how far into that song it had got, in seconds
 }
 
 def load_settings():
 	try:
 		with open(settings_file, 'r', encoding='utf-8') as f:
 			saved = json.load(f)
-		# Only take settings we know about, so an old or hand-edited file can't break anything
-		for key in settings:
-			if isinstance(saved.get(key), str):
-				settings[key] = saved[key]
+		# Only take settings we know about, and only if they're the right kind of value
+		# (text, number, True/False), so an old or hand-edited file can't break anything
+		for key, default in settings.items():
+			value = saved.get(key)
+			if type(default) is float and type(value) in (int, float):
+				# A whole number like 1 is fine for the volume too
+				settings[key] = float(value)
+			elif type(value) is type(default):
+				settings[key] = value
 	except FileNotFoundError:
 		# First run - no settings saved yet
 		pass
@@ -97,6 +110,13 @@ seek_offset = 0
 playlist_file = None
 # True when songs have been added, removed or moved since the last save
 playlist_changed = False
+# True when the Mute button is on - the volume slider stays where it was so unmuting puts it back
+muted = False
+# When the player starts up it gets ready to carry on where it left off.
+# resume_index is the song and resume_at is how many seconds in; Play starts from there.
+# Both go back to None as soon as any song is played or the playlist changes.
+resume_index = None
+resume_at = None
 
 # Turn a full path into the name shown in the playlist
 def display_name(path):
@@ -112,6 +132,27 @@ def add_to_playlist(path):
 	# If nothing is selected yet, select the first song
 	if not song_display.curselection():
 		song_display.select_set(0)
+	update_summary()
+
+# Turn a number of seconds into something short like "1h 32m" or "23m 45s"
+def format_total(seconds):
+	hours, rest = divmod(int(seconds), 3600)
+	minutes, secs = divmod(rest, 60)
+	if hours:
+		return f'{hours}h {minutes}m'
+	return f'{minutes}m {secs}s'
+
+# Show how many songs are in the playlist and how long it lasts, e.g. "24 songs · 1h 32m"
+def update_summary():
+	count = len(song_paths)
+	if count == 0:
+		playlist_summary.config(text='No songs')
+		return
+	total = 0
+	for path in song_paths:
+		total += get_length(path)
+	word = 'song' if count == 1 else 'songs'
+	playlist_summary.config(text=f'{count} {word} · {format_total(total)}')
 
 # Add song Function
 def add_song():
@@ -150,6 +191,7 @@ def delete_song():
 	song_display.delete(index)
 	del song_paths[index]
 	mark_changed()
+	update_summary()
 	if song_paths:
 		highlight(current_index if current_index is not None else min(index, len(song_paths) - 1))
 
@@ -163,6 +205,7 @@ def delete_all_songs():
 	song_paths.clear()
 	current_index = None
 	clear_song_labels()
+	update_summary()
 
 # Stop the once-a-second timer if it's running
 def cancel_timer():
@@ -226,13 +269,21 @@ def read_tags(path):
 		tags['genre'] = tag.genre.name
 	return tags
 
+# Lengths of songs we've already read, so each file only gets opened once
+# (the playlist total adds them all up every time a song is added or removed)
+song_lengths = {}
+
 # Length of a song in seconds (0 if it can't be read)
 def get_length(path):
+	if path in song_lengths:
+		return song_lengths[path]
 	try:
-		return MP3(path).info.length
+		length = MP3(path).info.length
 	except Exception as e:
 		print('Could not read length:', e)
-		return 0
+		length = 0
+	song_lengths[path] = length
+	return length
 
 # Size the album art is shown at (pixels)
 ART_SIZE = 160
@@ -300,15 +351,16 @@ def song_selected(event):
 		return
 	song_info(song_paths[selected[0]])
 
-# Load and play the song at a position in the playlist - everything that plays a song uses this
-def play_song(index):
-	global current_index, song_length, stopped, paused, timer_id, seek_offset
+# Load and play the song at a position in the playlist - everything that plays a song uses this.
+# start is how many seconds into the song to begin (0 = the beginning).
+def play_song(index, start=0):
+	global current_index, song_length, stopped, paused, timer_id, seek_offset, resume_index, resume_at
 	if index is None or index < 0 or index >= len(song_paths):
 		return
 	path = song_paths[index]
 	try:
 		pygame.mixer.music.load(path)
-		pygame.mixer.music.play(loops=0)
+		pygame.mixer.music.play(loops=0, start=start)
 	except pygame.error as e:
 		print('Could not play', path, e)
 		status_bar.config(text=f"Can't play {display_name(path)}  ")
@@ -317,11 +369,14 @@ def play_song(index):
 	current_index = index
 	stopped = False
 	paused = False
-	seek_offset = 0
+	seek_offset = start
+	# A song is playing now, so there's nothing left to carry on from
+	resume_index = None
+	resume_at = None
 	visualiser.load(path)
 	song_length = get_length(path)
 	# Reset Slider and Status bar
-	my_slider.config(to=max(int(song_length), 1), value=0)
+	my_slider.config(to=max(int(song_length), 1), value=start)
 	status_bar.config(text='')
 	highlight(index)
 	current_song.config(text=read_tags(path)['title'])
@@ -354,7 +409,19 @@ def play():
 		status_bar.config(text='Playlist is empty - add some songs first  ')
 		return
 	selected = song_display.curselection()
-	play_song(selected[0] if selected else 0)
+	index = selected[0] if selected else 0
+	if index == resume_index and resume_at:
+		# This is the song that was playing when the player was last closed - carry on from there
+		play_song(index, start=resume_at)
+	else:
+		play_song(index)
+
+# Space bar: play if nothing's playing, otherwise pause / resume
+def play_pause():
+	if stopped:
+		play()
+	else:
+		pause()
 
 # Forward button and end of song: next song, or a random one if Shuffle is ticked
 def next_track(song_finished=False):
@@ -462,11 +529,46 @@ def skip_back():
 def skip_forward():
 	skip(SKIP_SECONDS)
 
-def volume(x):
+# Set the sound level from the volume slider and the Mute button
+def apply_volume():
 	level = float(volume_slider.get())
-	pygame.mixer.music.set_volume(level)
-	# Show the volume as a percentage under the slider
-	volume_level.config(text=f'{round(level * 100)}%')
+	if muted:
+		pygame.mixer.music.set_volume(0)
+		volume_level.config(text='Muted')
+		mute_button.config(image=mute_on_img)
+	else:
+		pygame.mixer.music.set_volume(level)
+		# Show the volume as a percentage under the slider
+		volume_level.config(text=f'{round(level * 100)}%')
+		mute_button.config(image=mute_off_img)
+
+# Moving the volume slider - this also turns Mute off, so you hear the change
+def volume(x):
+	global muted
+	muted = False
+	apply_volume()
+
+# Mute button (and the M key) - switches the sound off and on again
+def toggle_mute():
+	global muted
+	muted = not muted
+	apply_volume()
+
+# Up/Down keys - turn the volume up or down a step
+VOLUME_STEP = 0.05
+
+def change_volume(step):
+	level = float(volume_slider.get()) + step
+	# Keep it between 0 and 1
+	level = min(1.0, max(0.0, level))
+	volume_slider.config(value=level)
+	volume(None)
+
+def volume_up():
+	change_volume(VOLUME_STEP)
+
+def volume_down():
+	change_volume(-VOLUME_STEP)
 
 # Shuffle button switches between Off and On, like the Repeat button
 def toggle_shuffle():
@@ -488,8 +590,11 @@ def update_title():
 	root.title(f'My MP3 - {name}{star}')
 
 def mark_changed():
-	global playlist_changed
+	global playlist_changed, resume_index, resume_at
 	playlist_changed = True
+	# Songs may have moved, so forget about carrying on from where the player was last closed
+	resume_index = None
+	resume_at = None
 	update_title()
 
 # Before throwing the current playlist away, offer to save it.
@@ -579,19 +684,12 @@ def read_playlist(path):
 				missing += 1
 	return songs, missing
 
-# Open a playlist - replaces the songs that are in the list now
-def open_playlist():
+# Load a playlist file - replaces the songs that are in the list now.
+# Used by Open Playlist and when the player starts up. Returns how many songs couldn't be found.
+def load_playlist(path):
 	global playlist_file, playlist_changed, current_index
-	if not ok_to_discard():
-		return
-	path = filedialog.askopenfilename(initialdir=playlist_start_folder(), title='Open Playlist', filetypes=(('Playlists', '*.m3u *.m3u8'), ))
-	if not path:
-		return
-	try:
-		songs, missing = read_playlist(path)
-	except OSError as e:
-		messagebox.showerror('Open Playlist', f"Couldn't open the playlist:\n{e}")
-		return
+	# read_playlist can fail with OSError - whoever calls this deals with that
+	songs, missing = read_playlist(path)
 	# Empty the current list, then fill it from the file
 	stop()
 	song_display.delete(0, END)
@@ -600,6 +698,7 @@ def open_playlist():
 	clear_song_labels()
 	for song in songs:
 		add_to_playlist(song)
+	update_summary()
 	playlist_file = path
 	# Songs that couldn't be found are dropped, so the playlist has changed from what's in the file
 	playlist_changed = missing > 0
@@ -608,6 +707,19 @@ def open_playlist():
 		status_bar.config(text=f'Opened {display_name(path)} - {missing} song(s) could not be found  ')
 	else:
 		status_bar.config(text=f'Opened {display_name(path)} - {len(songs)} songs  ')
+	return missing
+
+# Open a playlist - asks which file, then loads it
+def open_playlist():
+	if not ok_to_discard():
+		return
+	path = filedialog.askopenfilename(initialdir=playlist_start_folder(), title='Open Playlist', filetypes=(('Playlists', '*.m3u *.m3u8'), ))
+	if not path:
+		return
+	try:
+		load_playlist(path)
+	except OSError as e:
+		messagebox.showerror('Open Playlist', f"Couldn't open the playlist:\n{e}")
 
 # Start a new, empty playlist
 def new_playlist():
@@ -666,10 +778,82 @@ def set_music_folder():
 def set_playlist_folder():
 	choose_folder('playlist_folder', 'Playlist Folder')
 
+# ---------------- Remembering where you were ----------------
+
+# Called when the player closes - write the volume, playlist and song position to settings.json
+def remember_state():
+	settings['volume'] = float(volume_slider.get())
+	settings['muted'] = muted
+	settings['shuffle'] = shuf.get() == 1
+	settings['repeat'] = repeat_mode
+	settings['last_playlist'] = playlist_file or ''
+	# Only remember the song if the playlist on disk matches what's on screen
+	# (if it has unsaved changes, the song numbers in the file could be different)
+	if playlist_file and not playlist_changed and current_index is not None:
+		settings['last_song'] = current_index
+		settings['last_position'] = 0 if stopped else int(my_slider.get())
+	else:
+		settings['last_song'] = -1
+		settings['last_position'] = 0
+	save_settings()
+
+# Called once when the player starts - put things back the way they were left
+def restore_state():
+	global muted, repeat_mode, resume_index, resume_at
+	# Volume and Mute
+	volume_slider.config(value=settings['volume'])
+	muted = settings['muted']
+	apply_volume()
+	# Shuffle
+	if settings['shuffle']:
+		shuf.set(1)
+		shuffle_button.config(image=shuffle_on_img)
+	# Repeat (ignore anything that isn't one of the three modes)
+	if settings['repeat'] in (REPEAT_OFF, REPEAT_SONG, REPEAT_ALL):
+		repeat_mode = settings['repeat']
+		repeat_button.config(image=repeat_imgs[repeat_mode])
+	# The playlist that was open - if the file is still there
+	path = settings['last_playlist']
+	if not path or not os.path.isfile(path):
+		return
+	try:
+		missing = load_playlist(path)
+	except OSError as e:
+		print('Could not reopen the last playlist:', e)
+		return
+	# If songs have gone missing the numbers have shifted, so don't try to find the last song
+	song = settings['last_song']
+	if missing or song < 0 or song >= len(song_paths):
+		return
+	# Select the song and show its details, ready for Play
+	highlight(song)
+	current_song.config(text=read_tags(song_paths[song])['title'])
+	song_info(song_paths[song])
+	seconds = settings['last_position']
+	if 0 < seconds < get_length(song_paths[song]):
+		resume_index = song
+		resume_at = seconds
+		converted = time.strftime('%H:%M:%S', time.gmtime(seconds))
+		status_bar.config(text=f'Press Play to carry on from {converted}  ')
+
 # Closing the window or pressing Exit - offer to save first
 def exit_player():
 	if ok_to_discard():
+		remember_state()
 		root.quit()
+
+# Help > Keyboard Shortcuts
+SHORTCUTS_TEXT = '''Space\tPlay / Pause
+Enter\tPlay the selected song
+Left / Right\tBack / Forward 10 seconds
+Ctrl+Left / Ctrl+Right\tPrevious / Next song
+Up / Down\tVolume up / down
+M\tMute / Unmute
+Ctrl+O\tOpen playlist
+Ctrl+S\tSave playlist'''
+
+def show_shortcuts():
+	messagebox.showinfo('Keyboard Shortcuts', SHORTCUTS_TEXT)
 
 # Create Menu Bar and cascades
 my_menu = Menu(root)
@@ -704,6 +888,10 @@ remove_song_menu = Menu(my_menu)
 my_menu.add_cascade(label="Remove Songs", menu=remove_song_menu)
 remove_song_menu.add_command(label="Delete a song from playlist", command=delete_song)
 remove_song_menu.add_command(label="Delete all songs from playlist", command=delete_all_songs)
+# Help menu
+help_menu = Menu(my_menu)
+my_menu.add_cascade(label="Help", menu=help_menu)
+help_menu.add_command(label="Keyboard Shortcuts", command=show_shortcuts)
 
 # Title at top of screen
 title_label = Label(root, text="MAC's MEGA MIXES", font=("Helvetica", 24), fg="red", bd='1', relief=RAISED)
@@ -744,6 +932,9 @@ move_down_button = Button(move_frame, text='Move Down', width=10, command=move_d
 move_down_button.pack(side=LEFT, padx=5)
 Tooltip(move_up_button, 'Move the selected song up the playlist')
 Tooltip(move_down_button, 'Move the selected song down the playlist')
+# How many songs and how long the playlist lasts, next to the Move buttons
+playlist_summary = Label(move_frame, text='No songs')
+playlist_summary.pack(side=LEFT, padx=(15, 5))
 
 # Now playing panel - album art with the song info next to it
 info_frame = Frame(frame_song_display, bg="black", relief=RAISED, bd=1)
@@ -838,12 +1029,48 @@ vol_down_label.grid(row=1, column=1, sticky=S, padx=(2, 8), pady=5)
 volume_level = Label(volume_frame, text='100%')
 volume_level.grid(row=2, column=0, columnspan=2, pady=(0, 5))
 Tooltip(volume_slider, lambda: f'Volume {volume_level.cget("text")}')
+# Mute button under the volume - green speaker = sound on, grey crossed speaker = muted
+mute_off_img = button_image('mute_off')
+mute_on_img = button_image('mute_on')
+mute_button = Button(volume_frame, image=mute_off_img, borderwidth=0, highlightthickness=0, command=toggle_mute)
+mute_button.config(activebackground=mute_button.cget('background'))
+mute_button.grid(row=3, column=0, columnspan=2, pady=(0, 5))
+Tooltip(mute_button, lambda: 'Unmute' if muted else 'Mute')
 
-# Keyboard shortcuts and the window's close (X) button
+# ---------------- Keyboard shortcuts ----------------
+# Buttons and sliders mustn't take the keyboard focus, otherwise pressing Space on a
+# focused button would click it as well as doing the shortcut
+for widget in made + [move_up_button, move_down_button, mute_button, button_quit, my_slider, volume_slider]:
+	widget.config(takefocus=0)
+
+# Set up one shortcut key. It's bound to the playlist as well as the window, because the
+# playlist normally uses the arrow keys to move the red bar - 'break' stops it doing that too.
+def bind_key(key, action):
+	def handler(event):
+		action()
+		return 'break'
+	root.bind(key, handler)
+	song_display.bind(key, handler)
+
+bind_key('<space>', play_pause)
+bind_key('<Return>', play)
+bind_key('<Left>', skip_back)
+bind_key('<Right>', skip_forward)
+bind_key('<Control-Left>', previous_song)
+bind_key('<Control-Right>', next_track)
+bind_key('<Up>', volume_up)
+bind_key('<Down>', volume_down)
+bind_key('<Key-m>', toggle_mute)
+bind_key('<Key-M>', toggle_mute)
 root.bind('<Control-s>', lambda event: save_playlist())
 root.bind('<Control-o>', lambda event: open_playlist())
+# The window's close (X) button
 root.protocol('WM_DELETE_WINDOW', exit_player)
+# Start with the playlist ready for the keyboard
+song_display.focus_set()
+
 update_title()
+restore_state()
 
 root.mainloop()
 
