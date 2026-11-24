@@ -158,6 +158,21 @@ def speakers():
 		save(img, name, 30)
 
 
+# Mute button: green speaker with sound waves when the sound is on,
+# grey speaker with a cross when it's muted
+def mute():
+	for colour, name, muted in ((ON, 'btn_mute_off.png', False), (OFF, 'btn_mute_on.png', True)):
+		img, d = blank(colour)
+		d.polygon([(a * SCALE, b * SCALE) for a, b in ((24, 41), (34, 41), (48, 28), (48, 72), (34, 59), (24, 59))], fill=colour)
+		if muted:
+			line(d, colour, [(57, 42), (73, 58)], width=5)
+			line(d, colour, [(73, 42), (57, 58)], width=5)
+		else:
+			d.arc(p(42, 36, 62, 64), start=-50, end=50, fill=colour, width=5 * SCALE)
+			d.arc(p(42, 26, 78, 74), start=-50, end=50, fill=colour, width=5 * SCALE)
+		save(img, name, 40)
+
+
 if __name__ == '__main__':
 	play()
 	pause()
@@ -167,3 +182,4 @@ if __name__ == '__main__':
 	shuffle()
 	repeat()
 	speakers()
+	mute()

@@ -20,7 +20,8 @@ James's MP3 player for the Raspberry Pi, written in Python with Tkinter (window)
   the old icons (`icons/back.png`, `play.png` etc.), so don't delete those.
 - `audio.py` - an early Tkinter learning file, not part of the player.
 - `MP3_player_notes.txt` - setup steps (venv, pip installs). Update it when a new package is needed.
-- `settings.json` - saved music/playlist folders. Created when the player runs; not in git.
+- `settings.json` - saved music/playlist folders, plus volume, mute, shuffle, repeat and the
+  last playlist/song/position (written on exit). Created when the player runs; not in git.
 
 ## How MP3_Dev.py works
 - `song_paths` holds the full path of every song, in the same order as the playlist listbox.
@@ -30,7 +31,14 @@ James's MP3 player for the Raspberry Pi, written in Python with Tkinter (window)
   `get_pos()` to it; the visualiser uses this.
 - `play_time()` moves the slider along once a second.
 - Repeat modes: `REPEAT_OFF`, `REPEAT_SONG`, `REPEAT_ALL`. Shuffle is the `shuf` IntVar.
-- Playlists are saved as `.m3u` files.
+- Playlists are saved as `.m3u` files. `load_playlist(path)` loads one (Open Playlist and start-up use it).
+- `remember_state()` runs on exit and `restore_state()` at start-up. On start-up the last song is
+  selected, and `resume_index`/`resume_at` make Play carry on from where it was.
+- `play_song(index, start=0)` - `start` is seconds into the song.
+- Keyboard shortcuts are set up with `bind_key()` near the bottom; Help > Keyboard Shortcuts lists them.
+  Buttons and sliders have `takefocus=0` so Space doesn't click them as well.
+- `get_length()` caches lengths in `song_lengths`; `update_summary()` shows "N songs · total time".
+- Mute: `muted` flag, `apply_volume()` sets the sound from the slider + mute.
 
 ## Dependencies
 `pygame`, `mutagen`, `eyed3`, `pillow`, `numpy`, plus `python3-tk` from apt.
