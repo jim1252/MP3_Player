@@ -136,6 +136,10 @@ class Visualiser:
 	def grid(self, **options):
 		self.canvas.grid(**options)
 
+	# Or with pack(), the same way
+	def pack(self, **options):
+		self.canvas.pack(**options)
+
 	# Start analysing a new song in the background
 	def load(self, path):
 		if path == self.song:
