@@ -16,7 +16,9 @@ from tooltip import Tooltip
 
 root = Tk()
 root.title('My MP3')
-root.geometry("800x850")
+root.geometry("960x840")
+# Smallest the window can be dragged to before things get squashed
+root.minsize(960, 700)
 pygame.mixer.init()
 
 # Folder this script lives in - used to find the icons wherever you run it from
@@ -122,17 +124,122 @@ resume_at = None
 def display_name(path):
 	return os.path.splitext(os.path.basename(path))[0]
 
+# ---------------- The playlist table ----------------
+# The playlist is a table (a ttk Treeview) with these columns.
+# Each row's id is its position in song_paths as text ('0', '1', '2' ...), so row '3' is song_paths[3].
+PLAYLIST_COLUMNS = ('num', 'title', 'artist', 'album', 'time')
+COLUMN_HEADINGS = {'num': '#', 'title': 'Title', 'artist': 'Artist', 'album': 'Album', 'time': 'Time'}
+
+# Length of a song as minutes:seconds for the Time column, e.g. 3:42
+def short_time(seconds):
+	minutes, secs = divmod(int(seconds), 60)
+	return f'{minutes}:{secs:02d}'
+
+# Put one song into the table as a row, at the bottom
+def add_row(index):
+	path = song_paths[index]
+	tags = read_tags(path)
+	song_display.insert('', END, iid=str(index), values=(index + 1, tags['title'], tags['artist'], tags['album'], short_time(get_length(path))))
+
+# Empty the table (song_paths isn't touched)
+def clear_rows():
+	song_display.delete(*song_display.get_children())
+
+# Rebuild the whole table from song_paths - used after songs are removed, moved or sorted,
+# because every row's number changes
+def refresh_playlist():
+	clear_rows()
+	for index in range(len(song_paths)):
+		add_row(index)
+
+# Position in the playlist of the selected row (None if nothing is selected)
+def selected_index():
+	selected = song_display.selection()
+	if not selected:
+		return None
+	return int(selected[0])
+
 # Add one file to the playlist (used by both add functions)
 def add_to_playlist(path):
 	global last_folder
 	song_paths.append(path)
 	mark_changed()
-	song_display.insert(END, display_name(path))
+	add_row(len(song_paths) - 1)
 	last_folder = os.path.dirname(path)
 	# If nothing is selected yet, select the first song
-	if not song_display.curselection():
-		song_display.select_set(0)
+	if selected_index() is None:
+		song_display.selection_set('0')
 	update_summary()
+
+# ---------------- Sorting ----------------
+# Clicking a column heading sorts the playlist by it; clicking it again sorts the other way.
+# sort_column is the column it was last sorted by (None = not sorted, or moved about since).
+sort_column = None
+sort_reverse = False
+
+# Track number as a number for sorting (songs without one go first)
+def track_number(tags):
+	if isinstance(tags['track'], int):
+		return tags['track']
+	return 0
+
+# What to sort each song by, for each column. Lower case so 'abba' and 'ABBA' sort together.
+# Artist sorts by album then track within each artist, and Album sorts by track within each album,
+# so albums stay in their proper order.
+def sort_key(path, column):
+	tags = read_tags(path)
+	title = str(tags['title']).lower()
+	artist = str(tags['artist']).lower()
+	album = str(tags['album']).lower()
+	if column == 'title':
+		return (title, artist)
+	if column == 'artist':
+		return (artist, album, track_number(tags), title)
+	if column == 'album':
+		return (album, track_number(tags), title)
+	# 'time'
+	return (get_length(path), title)
+
+def sort_playlist(column):
+	global sort_column, sort_reverse, current_index
+	if not song_paths:
+		return
+	# Same column again = flip the order, a new column = A to Z (or shortest first)
+	if column == sort_column:
+		reverse = not sort_reverse
+	else:
+		reverse = False
+	# Remember which songs are playing and selected, so we can find them again after sorting
+	playing = song_paths[current_index] if current_index is not None else None
+	picked = selected_index()
+	picked_path = song_paths[picked] if picked is not None else None
+	song_paths.sort(key=lambda path: sort_key(path, column), reverse=reverse)
+	if playing is not None:
+		current_index = song_paths.index(playing)
+	refresh_playlist()
+	if current_index is not None:
+		highlight(current_index)
+	elif picked_path is not None:
+		highlight(song_paths.index(picked_path))
+	# The new order gets saved with the playlist
+	mark_changed()
+	# mark_changed() clears the arrow, so set it after
+	sort_column = column
+	sort_reverse = reverse
+	show_sort_arrow()
+
+# Put ▲ (A to Z) or ▼ (Z to A) on the heading the playlist is sorted by, and set up the
+# headings so clicking them sorts. The # column just shows the position, so it doesn't sort.
+def show_sort_arrow():
+	for column in PLAYLIST_COLUMNS:
+		text = COLUMN_HEADINGS[column]
+		if column == sort_column:
+			text += ' ▼' if sort_reverse else ' ▲'
+		if column == 'num':
+			song_display.heading(column, text=text, anchor=E)
+		else:
+			# 'column=column' makes each heading remember its own column name
+			song_display.heading(column, text=text, anchor=W, command=lambda column=column: sort_playlist(column))
 
 # Turn a number of seconds into something short like "1h 32m" or "23m 45s"
 def format_total(seconds):
@@ -176,10 +283,9 @@ def clear_song_labels():
 # delete a song
 def delete_song():
 	global current_index
-	selected = song_display.curselection()
-	if not selected:
+	index = selected_index()
+	if index is None:
 		return
-	index = selected[0]
 	if index == current_index:
 		# Deleting the song that's playing - stop it
 		stop()
@@ -188,8 +294,9 @@ def delete_song():
 	elif current_index is not None and index < current_index:
 		# A song above the playing one has gone, so it moves up one place
 		current_index -= 1
-	song_display.delete(index)
 	del song_paths[index]
+	# Every song below it moves up a number, so redo the table
+	refresh_playlist()
 	mark_changed()
 	update_summary()
 	if song_paths:
@@ -201,7 +308,7 @@ def delete_all_songs():
 	stop()
 	if song_paths:
 		mark_changed()
-	song_display.delete(0, END)
+	clear_rows()
 	song_paths.clear()
 	current_index = None
 	clear_song_labels()
@@ -238,13 +345,23 @@ def play_time():
 
 # Move the red bar in the playlist to a song
 def highlight(index):
-	song_display.selection_clear(0, END)
-	song_display.activate(index)
-	song_display.selection_set(index)
-	song_display.see(index)
+	row = str(index)
+	song_display.selection_set(row)
+	song_display.focus(row)
+	# Scroll the table so the row can be seen
+	song_display.see(row)
+
+# Tags of songs we've already read, so each file only gets read once
+# (the table needs them for every row, and sorting needs them for every song)
+song_tags = {}
 
 # Read the tags from a song, falling back to sensible values if any are missing
 def read_tags(path):
+	if path not in song_tags:
+		song_tags[path] = read_tags_from_file(path)
+	return song_tags[path]
+
+def read_tags_from_file(path):
 	tags = {
 		'title': display_name(path), 'artist': 'Unknown', 'album': 'Unknown',
 		'track': 'Unknown', 'composer': 'Unknown', 'publisher': 'Unknown', 'genre': 'None',
@@ -286,7 +403,7 @@ def get_length(path):
 	return length
 
 # Size the album art is shown at (pixels)
-ART_SIZE = 160
+ART_SIZE = 140
 # Picture files to look for in a song's folder when the MP3 has no art inside it
 COVER_FILES = ['cover.jpg', 'cover.png', 'folder.jpg', 'folder.png', 'front.jpg', 'front.png', 'albumart.jpg']
 
@@ -339,17 +456,26 @@ def show_album_art(path):
 def song_info(track):
 	tags = read_tags(track)
 	length = time.strftime('%H:%M:%S', time.gmtime(get_length(track)))
-	nl = '\n'
-	song_info_label.config(text=f'******* {nl} Title: {tags["title"]} {nl} Duration: {length} {nl} Artist: {tags["artist"]} {nl} Album: {tags["album"]} {nl} Track: {tags["track"]} {nl} Composer: {tags["composer"]} {nl} Publisher: {tags["publisher"]} {nl} Genre: {tags["genre"]} {nl} *******')
+	# The title goes in big letters at the top, the rest underneath, one per line
+	current_song.config(text=tags['title'])
+	lines = [
+		f'Artist: {tags["artist"]}',
+		f'Album: {tags["album"]}',
+		f'Track: {tags["track"]}    Genre: {tags["genre"]}',
+		f'Duration: {length}',
+		f'Composer: {tags["composer"]}',
+		f'Publisher: {tags["publisher"]}',
+	]
+	song_info_label.config(text='\n'.join(lines))
 	show_album_art(track)
 
 # Clicking a song in the playlist shows its info
 def song_selected(event):
-	selected = song_display.curselection()
+	index = selected_index()
 	# This also fires when the selection is cleared, so check something is selected
-	if not selected:
+	if index is None:
 		return
-	song_info(song_paths[selected[0]])
+	song_info(song_paths[index])
 
 # Load and play the song at a position in the playlist - everything that plays a song uses this.
 # start is how many seconds into the song to begin (0 = the beginning).
@@ -398,18 +524,16 @@ def song_position():
 def position():
 	if current_index is not None:
 		return current_index
-	selected = song_display.curselection()
-	if selected:
-		return selected[0]
-	return None
+	return selected_index()
 
 # play selected song
 def play():
 	if not song_paths:
 		status_bar.config(text='Playlist is empty - add some songs first  ')
 		return
-	selected = song_display.curselection()
-	index = selected[0] if selected else 0
+	index = selected_index()
+	if index is None:
+		index = 0
 	if index == resume_index and resume_at:
 		# This is the song that was playing when the player was last closed - carry on from there
 		play_song(index, start=resume_at)
@@ -588,13 +712,19 @@ def update_title():
 	name = display_name(playlist_file) if playlist_file else 'New Playlist'
 	star = ' *' if playlist_changed else ''
 	root.title(f'My MP3 - {name}{star}')
+	# The playlist's name also goes at the top of the playlist
+	playlist_header.config(text=f'Playlist: {name}{star}')
 
 def mark_changed():
-	global playlist_changed, resume_index, resume_at
+	global playlist_changed, resume_index, resume_at, sort_column
 	playlist_changed = True
 	# Songs may have moved, so forget about carrying on from where the player was last closed
 	resume_index = None
 	resume_at = None
+	# ...and the playlist may not be in sorted order any more, so take the arrow off the heading
+	if sort_column is not None:
+		sort_column = None
+		show_sort_arrow()
 	update_title()
 
 # Before throwing the current playlist away, offer to save it.
@@ -692,7 +822,7 @@ def load_playlist(path):
 	songs, missing = read_playlist(path)
 	# Empty the current list, then fill it from the file
 	stop()
-	song_display.delete(0, END)
+	clear_rows()
 	song_paths.clear()
 	current_index = None
 	clear_song_labels()
@@ -734,19 +864,17 @@ def new_playlist():
 # Move the selected song up (-1) or down (+1) the playlist
 def move_song(direction):
 	global current_index
-	selected = song_display.curselection()
-	if not selected:
+	index = selected_index()
+	if index is None:
 		return
-	index = selected[0]
 	new_index = index + direction
 	if new_index < 0 or new_index >= len(song_paths):
 		# Already at the top or bottom
 		return
 	# Swap the two songs in the list of paths...
 	song_paths[index], song_paths[new_index] = song_paths[new_index], song_paths[index]
-	# ...and in the listbox
-	song_display.delete(index)
-	song_display.insert(new_index, display_name(song_paths[new_index]))
+	# ...and redo the table so the rows and their numbers match
+	refresh_playlist()
 	# Keep track of the playing song if it was one of the two that swapped
 	if current_index == index:
 		current_index = new_index
@@ -893,59 +1021,59 @@ help_menu = Menu(my_menu)
 my_menu.add_cascade(label="Help", menu=help_menu)
 help_menu.add_command(label="Keyboard Shortcuts", command=show_shortcuts)
 
-# Title at top of screen
-title_label = Label(root, text="MAC's MEGA MIXES", font=("Helvetica", 24), fg="red", bd='1', relief=RAISED)
-title_label.pack()
+# ---------------- The window ----------------
+# Layout, top to bottom:
+#   title banner
+#   now playing strip: album art + song details on the left, visualiser on the right
+#   playlist: name and total at the top, the table of songs, Move Up / Move Down underneath
+#   position slider
+#   control buttons on the left, volume (mute, slider, level) on the right
+#   status bar with a small Exit button
 
-# Create Master Frame
-master_frame = Frame(root)
-master_frame.pack(pady=20)
+GREEN = '#00e000'     # same green as the buttons drawn by make_icons.py
+PANEL = 'black'       # background of the black panels
 
-# Song display frame + listbox frame
-frame_song_display = Frame(master_frame)
-frame_song_display.grid(row=0, column=0)
-listbox_frame = Frame(frame_song_display)
-listbox_frame.grid(row=1, column=0)
+# Title banner - black with green text and a green edge, to match the buttons
+title_label = Label(root, text="MAC's MEGA MIXES", font=("Helvetica", 24, "bold"), bg=PANEL, fg=GREEN,
+	highlightthickness=2, highlightbackground=GREEN, highlightcolor=GREEN, pady=4)
+title_label.pack(fill=X, padx=14, pady=(10, 8))
 
+# ----- Now playing strip -----
+top_frame = Frame(root)
+top_frame.pack(fill=X, padx=14)
 
-# Create Player control frame
-control_frame = Frame(master_frame, relief=RIDGE)
-control_frame.grid(row=1, column=0, columnspan=2, pady=20)
-
-# Create Playlist Display and Scroll Bar all inside frame_song_display
-current_song = Label(frame_song_display, text="", bg="black", fg="green", width=31, font=("Helvetica", 22), relief=RAISED)
-current_song.grid(row=0, column=0, columnspan=2)
-scroll_song_display = Scrollbar(listbox_frame, orient=VERTICAL)
-song_display = Listbox(listbox_frame, bg="black", fg="green", width=35, height=11, relief=RAISED, yscrollcommand=scroll_song_display.set, selectbackground="red", selectforeground="black", exportselection=False)
-#Configure scrollbar
-scroll_song_display.config(command=song_display.yview)
-scroll_song_display.pack(side=RIGHT, fill=Y)
-song_display.pack()
-song_display.bind("<<ListboxSelect>>", song_selected)
-
-# Move Up / Move Down buttons under the playlist
-move_frame = Frame(frame_song_display)
-move_frame.grid(row=2, column=0, pady=(5, 0))
-move_up_button = Button(move_frame, text='Move Up', width=10, command=move_up)
-move_up_button.pack(side=LEFT, padx=5)
-move_down_button = Button(move_frame, text='Move Down', width=10, command=move_down)
-move_down_button.pack(side=LEFT, padx=5)
-Tooltip(move_up_button, 'Move the selected song up the playlist')
-Tooltip(move_down_button, 'Move the selected song down the playlist')
-# How many songs and how long the playlist lasts, next to the Move buttons
-playlist_summary = Label(move_frame, text='No songs')
-playlist_summary.pack(side=LEFT, padx=(15, 5))
-
-# Now playing panel - album art with the song info next to it
-info_frame = Frame(frame_song_display, bg="black", relief=RAISED, bd=1)
-info_frame.grid(row=1, column=1, sticky=N+S, padx=(5, 0))
+info_frame = Frame(top_frame, bg=PANEL, relief=RAISED, bd=1)
+info_frame.pack(side=LEFT, fill=Y)
 # Music note picture, shown when a song has no album art (enlarged to fill the art box)
 no_art_img = ImageTk.PhotoImage(Image.open(os.path.join(script_dir, 'icons', '1486505261-eighth-eighth-note-multimedia-player-music-note_81397.png')).convert('RGBA').resize((ART_SIZE, ART_SIZE)))
-album_art_label = Label(info_frame, image=no_art_img, bg="black", width=ART_SIZE, height=ART_SIZE)
+album_art_label = Label(info_frame, image=no_art_img, bg=PANEL, width=ART_SIZE, height=ART_SIZE)
 album_art_label.image = no_art_img
-album_art_label.grid(row=0, column=0, padx=5, pady=5)
-song_info_label = Label(info_frame, text="No Song Selected", bg="black", fg="green", width=25, height=11, justify=LEFT, anchor=W)
-song_info_label.grid(row=0, column=1, padx=5, pady=5)
+album_art_label.grid(row=0, column=0, rowspan=2, padx=8, pady=8)
+# Name of the song that's playing, in big letters above its details
+current_song = Label(info_frame, text="", bg=PANEL, fg=GREEN, font=("Helvetica", 15, "bold"), width=22, anchor=W)
+current_song.grid(row=0, column=1, sticky=W, padx=(0, 8), pady=(8, 0))
+song_info_label = Label(info_frame, text="No Song Selected", bg=PANEL, fg=GREEN, width=30, justify=LEFT, anchor=NW)
+song_info_label.grid(row=1, column=1, sticky=NW, padx=(0, 8), pady=(2, 8))
+
+# Music visualiser - bars that bounce along to the song - fills the rest of the strip
+visualiser = Visualiser(top_frame, song_position, width=470, height=ART_SIZE + 16)
+visualiser.pack(side=RIGHT, padx=(10, 0))
+
+# ----- Status bar (packed now so it always stays at the very bottom) -----
+status_frame = Frame(root, bd=1, relief=GROOVE)
+status_frame.pack(fill=X, side=BOTTOM)
+# Small Exit button at the left of the status bar (File > Exit does the same)
+button_quit = Button(status_frame, text="Exit", bg="red", fg="white", activebackground="#c00000", font=("Helvetica", 10, "bold"), padx=10, pady=0, command=exit_player)
+button_quit.pack(side=LEFT, padx=4, pady=2)
+Tooltip(button_quit, 'Close the player')
+status_bar = Label(status_frame, text="", anchor=E)
+status_bar.pack(side=RIGHT, fill=X, expand=True, padx=4)
+
+# ----- Controls and volume -----
+controls_row = Frame(root)
+controls_row.pack(side=BOTTOM, fill=X, padx=14, pady=(0, 8))
+control_frame = Frame(controls_row)
+control_frame.pack(side=LEFT)
 
 # Images for the control buttons - all drawn by make_icons.py so they match
 def button_image(name):
@@ -985,57 +1113,90 @@ for column, (image, action, tip) in enumerate(buttons):
 	# Stop a grey square appearing behind the button when the mouse is over it
 	button.config(activebackground=button.cget('background'))
 	# A bigger gap before Shuffle and Repeat to set them apart from the playing controls
-	button.grid(row=0, column=column, padx=(25 if column == 7 else 6, 6))
+	button.grid(row=0, column=column, padx=(14 if column == 7 else 3, 3))
 	Tooltip(button, tip)
 	made.append(button)
 (back_button, back10_button, play_button, pause_button, stop_button,
 	forward10_button, forward_button, shuffle_button, repeat_button) = made
 
-# Create Music Position Slider
-my_slider = ttk.Scale(master_frame, from_=0, to=100, orient=HORIZONTAL, value=0, command=slide, length=500)
-my_slider.grid(row=2, column=0, pady=10)
-
-# Visualiser and volume side by side under the slider
-bottom_frame = Frame(master_frame)
-bottom_frame.grid(row=3, column=0, pady=(0, 5))
-
-# Music visualiser - bars that bounce along to the song
-visualiser = Visualiser(bottom_frame, song_position, width=500, height=150)
-visualiser.grid(row=0, column=0)
-
-# Exit button at bottom of the screen
-button_quit = Button(root, text="Exit", bg="red", font=("Helvetica", 22), relief=RAISED, command=exit_player)
-button_quit.pack(pady=10)
-
-# Create status bar
-status_bar = Label(root, text="", bd=1, relief=GROOVE, anchor=E)
-status_bar.pack(fill=X, side=BOTTOM, ipady=2)
-
-# Volume Slider
-# Volume sits to the right of the visualiser.
-# from_=1 to=0 puts loud at the top, so pushing the slider up makes it louder.
-volume_frame = LabelFrame(bottom_frame, text="Volume")
-volume_frame.grid(row=0, column=1, sticky=N+S, padx=(15, 0))
-volume_slider = ttk.Scale(volume_frame, from_=1, to=0, orient=VERTICAL, value=1, command=volume, length=100)
-volume_slider.grid(row=0, column=0, rowspan=2, padx=(8, 2), pady=5)
-# Loud speaker at the top and quiet speaker at the bottom show which way is which
-vol_up_img = button_image('volume_up')
-vol_down_img = button_image('volume_down')
-vol_up_label = Label(volume_frame, image=vol_up_img)
-vol_up_label.grid(row=0, column=1, sticky=N, padx=(2, 8), pady=5)
-vol_down_label = Label(volume_frame, image=vol_down_img)
-vol_down_label.grid(row=1, column=1, sticky=S, padx=(2, 8), pady=5)
-# Current volume as a percentage
-volume_level = Label(volume_frame, text='100%')
-volume_level.grid(row=2, column=0, columnspan=2, pady=(0, 5))
-Tooltip(volume_slider, lambda: f'Volume {volume_level.cget("text")}')
-# Mute button under the volume - green speaker = sound on, grey crossed speaker = muted
+# Volume - a long slider across to the right of the buttons.
+# Left is quiet and right is loud, with the Mute button at the start.
+volume_frame = Frame(controls_row)
+volume_frame.pack(side=RIGHT)
 mute_off_img = button_image('mute_off')
 mute_on_img = button_image('mute_on')
 mute_button = Button(volume_frame, image=mute_off_img, borderwidth=0, highlightthickness=0, command=toggle_mute)
 mute_button.config(activebackground=mute_button.cget('background'))
-mute_button.grid(row=3, column=0, columnspan=2, pady=(0, 5))
+mute_button.pack(side=LEFT, padx=(0, 6))
 Tooltip(mute_button, lambda: 'Unmute' if muted else 'Mute')
+vol_down_img = button_image('volume_down')
+vol_up_img = button_image('volume_up')
+vol_down_label = Label(volume_frame, image=vol_down_img)
+vol_down_label.pack(side=LEFT)
+volume_slider = ttk.Scale(volume_frame, from_=0, to=1, orient=HORIZONTAL, value=1, command=volume, length=150)
+volume_slider.pack(side=LEFT, padx=4)
+vol_up_label = Label(volume_frame, image=vol_up_img)
+vol_up_label.pack(side=LEFT)
+# Current volume as a percentage (says "Muted" when muted)
+volume_level = Label(volume_frame, text='100%', width=6)
+volume_level.pack(side=LEFT, padx=(4, 0))
+Tooltip(volume_slider, lambda: f'Volume {volume_level.cget("text")}')
+
+# Music Position Slider - right across the window, just above the buttons
+my_slider = ttk.Scale(root, from_=0, to=100, orient=HORIZONTAL, value=0, command=slide)
+my_slider.pack(side=BOTTOM, fill=X, padx=14, pady=(4, 8))
+
+# ----- Playlist - fills all the space that's left in the middle -----
+playlist_frame = Frame(root, bg=PANEL, relief=RAISED, bd=1)
+playlist_frame.pack(fill=BOTH, expand=True, padx=14, pady=(10, 0))
+
+# Header: playlist name on the left, number of songs and total time on the right
+header_frame = Frame(playlist_frame, bg='#101010')
+header_frame.pack(fill=X)
+playlist_header = Label(header_frame, text='Playlist: New Playlist', bg='#101010', fg=GREEN, font=("Helvetica", 13, "bold"), anchor=W)
+playlist_header.pack(side=LEFT, padx=8, pady=4)
+playlist_summary = Label(header_frame, text='No songs', bg='#101010', fg=GREEN)
+playlist_summary.pack(side=RIGHT, padx=8)
+
+# The table of songs. Colours are set with a ttk Style:
+# black with green writing, and the selected (playing) song in red like before.
+style = ttk.Style()
+# The 'clam' look lets us colour the column headings too
+style.theme_use('clam')
+style.configure('Playlist.Treeview', background=PANEL, fieldbackground=PANEL, foreground=GREEN, rowheight=22, borderwidth=0)
+style.map('Playlist.Treeview', background=[('selected', 'red')], foreground=[('selected', 'black')])
+style.configure('Playlist.Treeview.Heading', background='#1c1c1c', foreground='#d0d0d0', font=("Helvetica", 10, "bold"), relief=FLAT)
+style.map('Playlist.Treeview.Heading', background=[('active', '#333333')])
+
+table_frame = Frame(playlist_frame, bg=PANEL)
+table_frame.pack(fill=BOTH, expand=True)
+scroll_song_display = ttk.Scrollbar(table_frame, orient=VERTICAL)
+song_display = ttk.Treeview(table_frame, columns=PLAYLIST_COLUMNS, show='headings', selectmode='browse', style='Playlist.Treeview', yscrollcommand=scroll_song_display.set)
+scroll_song_display.config(command=song_display.yview)
+scroll_song_display.pack(side=RIGHT, fill=Y)
+song_display.pack(side=LEFT, fill=BOTH, expand=True)
+# Column widths - Title, Artist and Album stretch when the window gets wider
+song_display.column('num', width=40, minwidth=40, stretch=False, anchor=E)
+song_display.column('title', width=260, minwidth=100)
+song_display.column('artist', width=180, minwidth=80)
+song_display.column('album', width=180, minwidth=80)
+song_display.column('time', width=60, minwidth=60, stretch=False, anchor=E)
+song_display.bind("<<TreeviewSelect>>", song_selected)
+# Double-click a song to play it
+song_display.bind("<Double-Button-1>", lambda event: play())
+show_sort_arrow()
+
+# Move Up / Move Down buttons under the playlist
+move_frame = Frame(playlist_frame, bg=PANEL)
+move_frame.pack(fill=X, pady=4)
+move_up_button = Button(move_frame, text='Move Up', width=10, command=move_up)
+move_up_button.pack(side=LEFT, padx=(8, 5))
+move_down_button = Button(move_frame, text='Move Down', width=10, command=move_down)
+move_down_button.pack(side=LEFT, padx=5)
+Tooltip(move_up_button, 'Move the selected song up the playlist')
+Tooltip(move_down_button, 'Move the selected song down the playlist')
+sort_hint = Label(move_frame, text='Click a column heading to sort', bg=PANEL, fg='#909090')
+sort_hint.pack(side=RIGHT, padx=8)
 
 # ---------------- Keyboard shortcuts ----------------
 # Buttons and sliders mustn't take the keyboard focus, otherwise pressing Space on a
