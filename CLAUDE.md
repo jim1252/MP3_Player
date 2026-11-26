@@ -35,6 +35,12 @@ James's MP3 player for the Raspberry Pi, written in Python with Tkinter (window)
   Each row's id is its index in `song_paths` as text ('0', '1'...). `selected_index()` gives the
   selected row, `refresh_playlist()` rebuilds the table after songs are removed, moved or sorted.
 - Clicking a heading calls `sort_playlist(column)`; `mark_changed()` clears the sort arrow.
+- Add to another playlist: right-click a song (`song_menu`), the Add to Playlist button, or
+  Playlist > Add Song to Another Playlist. `make_add_menu()` builds a menu that refills itself
+  from `saved_playlists()` (the playlist folder) each time it opens. `append_to_playlist_file()`
+  adds the song to the end of that .m3u file (skips it if it's already there); the open playlist
+  isn't changed. One song at a time for now - multi-select is on the to-do list.
+- `tidy_path()` makes every song path look the same (play history is keyed by path).
 - `read_tags()` caches tags in `song_tags` (like `get_length()` does with lengths).
 - `play_song(index)` is the one place songs get started - use it for anything that plays a song.
 - pygame can't say where a song is after seeking, so `seek_offset` remembers where playback last

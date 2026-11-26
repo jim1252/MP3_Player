@@ -1012,6 +1012,123 @@ def new_playlist():
 	playlist_changed = False
 	update_title()
 
+# ---------------- Adding a song to another playlist ----------------
+# Right-click a song (or use the Add to Playlist button) to put it into a different
+# saved playlist. The song is added to the end of that playlist's file - the playlist
+# that's open stays as it is, and whatever's playing carries on.
+
+# The saved playlists in the playlist folder (File > Settings), sorted by name.
+# If no playlist folder is set, it uses the folder of the playlist that's open.
+def saved_playlists():
+	folder = setting_folder('playlist_folder')
+	if folder is None and playlist_file:
+		folder = os.path.dirname(playlist_file)
+	if folder is None:
+		return []
+	found = []
+	try:
+		names = os.listdir(folder)
+	except OSError as e:
+		print('Could not look in the playlist folder:', e)
+		return []
+	for name in names:
+		if name.lower().endswith(('.m3u', '.m3u8')):
+			found.append(os.path.join(folder, name))
+	# Sort by name, ignoring upper/lower case
+	found.sort(key=lambda path: display_name(path).lower())
+	return found
+
+# True if two paths are the same file (written the same way once tidied)
+def same_file(path1, path2):
+	return tidy_path(path1) == tidy_path(path2)
+
+# Add one song to the end of a playlist file. Returns True if it was added,
+# False if it was already in it. Can fail with OSError - whoever calls this deals with that.
+def append_to_playlist_file(song, playlist):
+	if os.path.isfile(playlist):
+		songs_in_it, missing = read_playlist(playlist)
+		for other in songs_in_it:
+			if same_file(other, song):
+				return False
+		# Make sure the file ends with a new line before adding to it
+		with open(playlist, 'rb') as f:
+			data = f.read()
+		start = '' if data == b'' or data.endswith(b'\n') else '\n'
+	else:
+		start = '#EXTM3U\n'
+	tags = read_tags(song)
+	# 'a' = append: add to the end without touching what's already there
+	with open(playlist, 'a', encoding='utf-8') as f:
+		f.write(start)
+		f.write(f'#EXTINF:{int(get_length(song))},{tags["artist"]} - {tags["title"]}\n')
+		f.write(song + '\n')
+	return True
+
+# Add the selected song to the playlist file chosen from the menu
+def add_selected_to(playlist):
+	index = selected_index()
+	if index is None:
+		status_bar.config(text='Select a song first  ')
+		return
+	song = song_paths[index]
+	title = read_tags(song)['title']
+	name = display_name(playlist)
+	if playlist_file and same_file(playlist, playlist_file):
+		status_bar.config(text=f'{title} is already in {name} - it is the playlist that is open  ')
+		return
+	try:
+		added = append_to_playlist_file(song, playlist)
+	except OSError as e:
+		messagebox.showerror('Add to Playlist', f"Couldn't add the song to {name}:\n{e}")
+		return
+	if added:
+		status_bar.config(text=f'Added {title} to {name}  ')
+	else:
+		status_bar.config(text=f'{title} is already in {name}  ')
+
+# "Other playlist..." - pick any playlist file
+def add_selected_to_other():
+	if selected_index() is None:
+		status_bar.config(text='Select a song first  ')
+		return
+	path = filedialog.askopenfilename(initialdir=playlist_start_folder(), title='Add Song to Playlist', filetypes=(('Playlists', '*.m3u *.m3u8'), ))
+	if path:
+		add_selected_to(path)
+
+# "New playlist..." - type a name for a new playlist with this song in it.
+# If you pick a playlist that already exists, the song is added to it rather than replacing it.
+def add_selected_to_new():
+	if selected_index() is None:
+		status_bar.config(text='Select a song first  ')
+		return
+	path = filedialog.asksaveasfilename(initialdir=playlist_start_folder(), title='New Playlist for this Song', defaultextension='.m3u', filetypes=(('Playlists', '*.m3u *.m3u8'), ), confirmoverwrite=False)
+	if path:
+		add_selected_to(path)
+
+# Fill an "Add to playlist" menu with the saved playlists. It's rebuilt every time the
+# menu opens, so a playlist saved a minute ago is in the list.
+def fill_add_menu(menu):
+	menu.delete(0, END)
+	playlists = saved_playlists()
+	if not playlists:
+		menu.add_command(label='(no saved playlists in the playlist folder)', state=DISABLED)
+	for path in playlists:
+		if playlist_file and same_file(path, playlist_file):
+			# The playlist that's open - the song is already in it
+			menu.add_command(label=f'{display_name(path)}  (open now)', state=DISABLED)
+		else:
+			# 'path=path' makes each menu item remember its own playlist
+			menu.add_command(label=display_name(path), command=lambda path=path: add_selected_to(path))
+	menu.add_separator()
+	menu.add_command(label='Other playlist...', command=add_selected_to_other)
+	menu.add_command(label='New playlist...', command=add_selected_to_new)
+
+# Make an "Add to playlist" menu that fills itself each time it opens
+def make_add_menu(parent):
+	menu = Menu(parent, tearoff=0)
+	menu.config(postcommand=lambda: fill_add_menu(menu))
+	return menu
+
 # Move the selected song up (-1) or down (+1) the playlist
 def move_song(direction):
 	global current_index
@@ -1156,6 +1273,7 @@ playlist_menu.add_command(label="Save Playlist As...", command=save_playlist_as)
 playlist_menu.add_separator()
 playlist_menu.add_command(label="Move Song Up", command=move_up)
 playlist_menu.add_command(label="Move Song Down", command=move_down)
+playlist_menu.add_cascade(label="Add Song to Another Playlist", menu=make_add_menu(playlist_menu))
 #add Song Menu
 add_song_menu = Menu(my_menu)
 my_menu.add_cascade(label="Add Songs", menu=add_song_menu)
@@ -1348,13 +1466,46 @@ move_down_button = Button(move_frame, text='Move Down', width=10, command=move_d
 move_down_button.pack(side=LEFT, padx=5)
 Tooltip(move_up_button, 'Move the selected song up the playlist')
 Tooltip(move_down_button, 'Move the selected song down the playlist')
+
+# Add to Playlist button - opens the list of playlists just under the button
+button_add_menu = make_add_menu(root)
+
+def show_add_menu():
+	x = add_to_button.winfo_rootx()
+	y = add_to_button.winfo_rooty() + add_to_button.winfo_height()
+	button_add_menu.tk_popup(x, y)
+
+add_to_button = Button(move_frame, text='Add to Playlist...', command=show_add_menu)
+add_to_button.pack(side=LEFT, padx=(15, 5))
+Tooltip(add_to_button, 'Add the selected song to another playlist')
+
+# Right-click menu for the songs in the playlist
+song_menu = Menu(root, tearoff=0)
+song_menu.add_command(label='Play', command=play)
+song_menu.add_cascade(label='Add to playlist', menu=make_add_menu(song_menu))
+song_menu.add_separator()
+song_menu.add_command(label='Move Up', command=move_up)
+song_menu.add_command(label='Move Down', command=move_down)
+song_menu.add_separator()
+song_menu.add_command(label='Delete from this playlist', command=delete_song)
+
+# Right-clicking a song selects it first, then shows the menu where the mouse is
+def right_click(event):
+	row = song_display.identify_row(event.y)
+	if not row:
+		# Clicked below the last song
+		return
+	highlight(int(row))
+	song_menu.tk_popup(event.x_root, event.y_root)
+
+song_display.bind('<Button-3>', right_click)
 sort_hint = Label(move_frame, text='Click a column heading to sort', bg=PANEL, fg='#909090')
 sort_hint.pack(side=RIGHT, padx=8)
 
 # ---------------- Keyboard shortcuts ----------------
 # Buttons and sliders mustn't take the keyboard focus, otherwise pressing Space on a
 # focused button would click it as well as doing the shortcut
-for widget in made + [move_up_button, move_down_button, mute_button, button_quit, my_slider, volume_slider]:
+for widget in made + [move_up_button, move_down_button, add_to_button, mute_button, button_quit, my_slider, volume_slider]:
 	widget.config(takefocus=0)
 
 # Set up one shortcut key. It's bound to the playlist as well as the window, because the
