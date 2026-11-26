@@ -3,3 +3,4 @@ virt
 env/
 __pycache__/
 settings.json
+play_history.json

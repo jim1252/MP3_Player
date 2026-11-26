@@ -22,13 +22,16 @@ James's MP3 player for the Raspberry Pi, written in Python with Tkinter (window)
 - `MP3_player_notes.txt` - setup steps (venv, pip installs). Update it when a new package is needed.
 - `settings.json` - saved music/playlist folders, plus volume, mute, shuffle, repeat and the
   last playlist/song/position (written on exit). Created when the player runs; not in git.
+- `play_history.json` - play count and last played time for each song, keyed by full path.
+  Written each time a play is counted. Not in git.
 
 ## How MP3_Dev.py works
 - Window layout (top to bottom): title banner, now-playing strip (art + details, visualiser),
   playlist table, position slider, buttons + horizontal volume, status bar with a small Exit button.
   The window section starts at `# ---------------- The window ----------------`.
 - `song_paths` holds the full path of every song, in the same order as the playlist table.
-- The playlist is a ttk `Treeview` (`song_display`) with columns #, Title, Artist, Album, Time.
+- The playlist is a ttk `Treeview` (`song_display`) with columns #, Title, Artist, Album, Time,
+  Plays, Last played.
   Each row's id is its index in `song_paths` as text ('0', '1'...). `selected_index()` gives the
   selected row, `refresh_playlist()` rebuilds the table after songs are removed, moved or sorted.
 - Clicking a heading calls `sort_playlist(column)`; `mark_changed()` clears the sort arrow.
@@ -47,6 +50,9 @@ James's MP3 player for the Raspberry Pi, written in Python with Tkinter (window)
   Buttons and sliders have `takefocus=0` so Space doesn't click them as well.
 - `get_length()` caches lengths in `song_lengths`; `update_summary()` shows "N songs · total time".
 - Mute: `muted` flag, `apply_volume()` sets the sound from the slider + mute.
+- Play history: `play_time()` calls `listened_a_second()`, which adds up real listening time
+  (seeking doesn't count). After `COUNT_AFTER_SECONDS` (30), or half a shorter song,
+  `count_play(path)` adds one, saves `play_history.json` and updates the table.
 
 ## Dependencies
 `pygame`, `mutagen`, `eyed3`, `pillow`, `numpy`, plus `python3-tk` from apt.

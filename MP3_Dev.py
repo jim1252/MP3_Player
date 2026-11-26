@@ -11,6 +11,7 @@ import eyed3
 import os
 from io import BytesIO
 import json
+from datetime import datetime, date
 from visualiser import Visualiser
 from tooltip import Tooltip
 
@@ -70,6 +71,101 @@ def save_settings():
 	except OSError as e:
 		messagebox.showerror('Settings', f"Couldn't save settings:\n{e}")
 
+# ---------------- Play history ----------------
+# How many times each song has been played and when it was last played, kept in
+# play_history.json next to settings.json (not in git). It's keyed by each song's full path,
+# so a song has one count whichever playlist it's played from. Looks like:
+#   {"/home/james/Music/Anchor.mp3": {"plays": 12, "last_played": "2026-11-26 10:59"}}
+# Moving or renaming a song file means it starts again from 0.
+history_file = os.path.join(script_dir, 'play_history.json')
+play_history = {}
+
+# A song counts as played after this many seconds of listening (or halfway, if it's shorter)
+COUNT_AFTER_SECONDS = 30
+
+def load_history():
+	global play_history
+	try:
+		with open(history_file, 'r', encoding='utf-8') as f:
+			saved = json.load(f)
+		if isinstance(saved, dict):
+			play_history = saved
+	except FileNotFoundError:
+		# Nothing has been played yet
+		pass
+	except (OSError, ValueError) as e:
+		print('Could not read play history:', e)
+
+def save_history():
+	try:
+		with open(history_file, 'w', encoding='utf-8') as f:
+			json.dump(play_history, f, indent=4)
+	except OSError as e:
+		# Not worth a pop-up in the middle of a song - just mention it
+		print('Could not save play history:', e)
+
+# How many times a song has been played (0 if never)
+def play_count(path):
+	entry = play_history.get(path)
+	if isinstance(entry, dict) and isinstance(entry.get('plays'), int):
+		return entry['plays']
+	return 0
+
+# When a song was last played, as text like "2026-11-26 10:59" ('' if never)
+def last_played(path):
+	entry = play_history.get(path)
+	if isinstance(entry, dict) and isinstance(entry.get('last_played'), str):
+		return entry['last_played']
+	return ''
+
+# Last played in a short form for the table: "Today 10:59", "Yesterday 21:30" or "24 Nov 2026"
+def short_last_played(path):
+	text = last_played(path)
+	if not text:
+		return ''
+	try:
+		when = datetime.strptime(text, '%Y-%m-%d %H:%M')
+	except ValueError:
+		return text
+	days_ago = (date.today() - when.date()).days
+	if days_ago == 0:
+		return 'Today ' + when.strftime('%H:%M')
+	if days_ago == 1:
+		return 'Yesterday ' + when.strftime('%H:%M')
+	return when.strftime('%d %b %Y')
+
+# Add one play to a song, save the history, and update its row(s) and the details panel
+def count_play(path):
+	entry = play_history.get(path)
+	if not isinstance(entry, dict):
+		entry = {}
+	entry['plays'] = play_count(path) + 1
+	entry['last_played'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+	play_history[path] = entry
+	save_history()
+	# The same song can be in the playlist more than once, so update every row it's in
+	for index, song in enumerate(song_paths):
+		if song == path:
+			song_display.set(str(index), 'plays', play_count(path))
+			song_display.set(str(index), 'last', short_last_played(path))
+	# If the details panel is showing this song, refresh it so the count goes up there too
+	shown = selected_index()
+	if shown is not None and song_paths[shown] == path:
+		song_info(path)
+
+# Called once a second while a song is playing (from play_time).
+# Adds up how long it's actually been listened to - jumping ahead with the slider doesn't count -
+# and counts the play once it gets far enough.
+def listened_a_second():
+	global listened_seconds, play_counted
+	if play_counted or current_index is None:
+		return
+	listened_seconds += 1
+	needed = min(COUNT_AFTER_SECONDS, song_length / 2)
+	if listened_seconds >= needed:
+		play_counted = True
+		count_play(song_paths[current_index])
+
 # A folder from settings, if it's set and still exists (a USB stick might be unplugged)
 def setting_folder(key):
 	folder = settings[key]
@@ -92,6 +188,7 @@ def playlist_start_folder():
 	return last_folder
 
 load_settings()
+load_history()
 
 # Full path of every song in the playlist, in the same order as the listbox.
 # The listbox only shows the song name; this list remembers where each file
@@ -119,6 +216,9 @@ muted = False
 # Both go back to None as soon as any song is played or the playlist changes.
 resume_index = None
 resume_at = None
+# Seconds the current song has actually been listened to, and whether it's been counted yet
+listened_seconds = 0
+play_counted = False
 
 # Turn a full path into the name shown in the playlist
 def display_name(path):
@@ -127,8 +227,8 @@ def display_name(path):
 # ---------------- The playlist table ----------------
 # The playlist is a table (a ttk Treeview) with these columns.
 # Each row's id is its position in song_paths as text ('0', '1', '2' ...), so row '3' is song_paths[3].
-PLAYLIST_COLUMNS = ('num', 'title', 'artist', 'album', 'time')
-COLUMN_HEADINGS = {'num': '#', 'title': 'Title', 'artist': 'Artist', 'album': 'Album', 'time': 'Time'}
+PLAYLIST_COLUMNS = ('num', 'title', 'artist', 'album', 'time', 'plays', 'last')
+COLUMN_HEADINGS = {'num': '#', 'title': 'Title', 'artist': 'Artist', 'album': 'Album', 'time': 'Time', 'plays': 'Plays', 'last': 'Last played'}
 
 # Length of a song as minutes:seconds for the Time column, e.g. 3:42
 def short_time(seconds):
@@ -139,7 +239,8 @@ def short_time(seconds):
 def add_row(index):
 	path = song_paths[index]
 	tags = read_tags(path)
-	song_display.insert('', END, iid=str(index), values=(index + 1, tags['title'], tags['artist'], tags['album'], short_time(get_length(path))))
+	song_display.insert('', END, iid=str(index), values=(index + 1, tags['title'], tags['artist'], tags['album'], short_time(get_length(path)),
+		play_count(path), short_last_played(path)))
 
 # Empty the table (song_paths isn't touched)
 def clear_rows():
@@ -197,6 +298,11 @@ def sort_key(path, column):
 		return (artist, album, track_number(tags), title)
 	if column == 'album':
 		return (album, track_number(tags), title)
+	if column == 'plays':
+		return (play_count(path), title)
+	if column == 'last':
+		# The saved text "2026-11-26 10:59" sorts in date order as it is
+		return (last_played(path), title)
 	# 'time'
 	return (get_length(path), title)
 
@@ -204,9 +310,12 @@ def sort_playlist(column):
 	global sort_column, sort_reverse, current_index
 	if not song_paths:
 		return
-	# Same column again = flip the order, a new column = A to Z (or shortest first)
+	# Same column again = flip the order. A new column = A to Z (or shortest first),
+	# except Plays and Last played, which start with the most played / most recent at the top.
 	if column == sort_column:
 		reverse = not sort_reverse
+	elif column in ('plays', 'last'):
+		reverse = True
 	else:
 		reverse = False
 	# Remember which songs are playing and selected, so we can find them again after sorting
@@ -330,6 +439,7 @@ def play_time():
 	converted_length = time.strftime('%H:%M:%S', time.gmtime(song_length))
 
 	if not paused:
+		listened_a_second()
 		next_time = int(my_slider.get()) + 1
 		if next_time >= int(song_length):
 			# Song has finished
@@ -452,6 +562,14 @@ def show_album_art(path):
 	# Keep a reference to the picture - without this Python throws it away and the label goes blank
 	album_art_label.image = art
 
+# "never", "once" or "12 times, last Today 10:59" for the details panel
+def plays_text(path):
+	count = play_count(path)
+	if count == 0:
+		return 'never'
+	times = 'once' if count == 1 else f'{count} times'
+	return f'{times}, last {short_last_played(path)}'
+
 #get the information for the selected song
 def song_info(track):
 	tags = read_tags(track)
@@ -463,6 +581,7 @@ def song_info(track):
 		f'Album: {tags["album"]}',
 		f'Track: {tags["track"]}    Genre: {tags["genre"]}',
 		f'Duration: {length}',
+		f'Played: {plays_text(track)}',
 		f'Composer: {tags["composer"]}',
 		f'Publisher: {tags["publisher"]}',
 	]
@@ -481,6 +600,7 @@ def song_selected(event):
 # start is how many seconds into the song to begin (0 = the beginning).
 def play_song(index, start=0):
 	global current_index, song_length, stopped, paused, timer_id, seek_offset, resume_index, resume_at
+	global listened_seconds, play_counted
 	if index is None or index < 0 or index >= len(song_paths):
 		return
 	path = song_paths[index]
@@ -499,6 +619,9 @@ def play_song(index, start=0):
 	# A song is playing now, so there's nothing left to carry on from
 	resume_index = None
 	resume_at = None
+	# Start counting listening time for this song afresh (Repeat counts each time round)
+	listened_seconds = 0
+	play_counted = False
 	visualiser.load(path)
 	song_length = get_length(path)
 	# Reset Slider and Status bar
@@ -1177,10 +1300,12 @@ scroll_song_display.pack(side=RIGHT, fill=Y)
 song_display.pack(side=LEFT, fill=BOTH, expand=True)
 # Column widths - Title, Artist and Album stretch when the window gets wider
 song_display.column('num', width=40, minwidth=40, stretch=False, anchor=E)
-song_display.column('title', width=260, minwidth=100)
-song_display.column('artist', width=180, minwidth=80)
-song_display.column('album', width=180, minwidth=80)
-song_display.column('time', width=60, minwidth=60, stretch=False, anchor=E)
+song_display.column('title', width=220, minwidth=100)
+song_display.column('artist', width=150, minwidth=80)
+song_display.column('album', width=150, minwidth=80)
+song_display.column('time', width=55, minwidth=55, stretch=False, anchor=E)
+song_display.column('plays', width=50, minwidth=50, stretch=False, anchor=E)
+song_display.column('last', width=120, minwidth=100, stretch=False, anchor=E)
 song_display.bind("<<TreeviewSelect>>", song_selected)
 # Double-click a song to play it
 song_display.bind("<Double-Button-1>", lambda event: play())
