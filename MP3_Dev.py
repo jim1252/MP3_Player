@@ -80,21 +80,48 @@ def save_settings():
 history_file = os.path.join(script_dir, 'play_history.json')
 play_history = {}
 
+# Write a song's path the same way every time, e.g. '/home/james/Music//Anchor.mp3' and
+# '/home/james/Music/./Anchor.mp3' both become '/home/james/Music/Anchor.mp3'.
+# The play history looks songs up by path, so the same song must always have the same path -
+# whether it came from the file picker or from a playlist file.
+def tidy_path(path):
+	return os.path.normpath(os.path.abspath(path))
+
 # A song counts as played after this many seconds of listening (or halfway, if it's shorter)
 COUNT_AFTER_SECONDS = 30
 
 def load_history():
-	global play_history
 	try:
 		with open(history_file, 'r', encoding='utf-8') as f:
 			saved = json.load(f)
 		if isinstance(saved, dict):
-			play_history = saved
+			for path, entry in saved.items():
+				add_saved_history(path, entry)
 	except FileNotFoundError:
 		# Nothing has been played yet
 		pass
 	except (OSError, ValueError) as e:
 		print('Could not read play history:', e)
+
+# Put one entry from play_history.json into play_history, with its path tidied.
+# Older versions of the player could save the same song under two slightly different paths,
+# so if the tidied path is already there, the two are joined: plays added up, latest time kept.
+def add_saved_history(path, entry):
+	if not isinstance(entry, dict):
+		return
+	path = tidy_path(path)
+	if path not in play_history:
+		play_history[path] = entry
+		return
+	plays = play_count(path)
+	if isinstance(entry.get('plays'), int):
+		plays += entry['plays']
+	latest = last_played(path)
+	other = entry.get('last_played')
+	# The text "2026-11-26 10:59" sorts in date order, so the bigger one is the later time
+	if isinstance(other, str) and other > latest:
+		latest = other
+	play_history[path] = {'plays': plays, 'last_played': latest}
 
 def save_history():
 	try:
@@ -263,6 +290,7 @@ def selected_index():
 # Add one file to the playlist (used by both add functions)
 def add_to_playlist(path):
 	global last_folder
+	path = tidy_path(path)
 	song_paths.append(path)
 	mark_changed()
 	add_row(len(song_paths) - 1)
