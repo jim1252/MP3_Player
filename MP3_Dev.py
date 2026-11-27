@@ -407,6 +407,56 @@ def add_song():
 	if song:
 		add_to_playlist(song)
 
+# Add Songs > Add a folder of songs - every MP3 in a folder and all the folders inside it
+# If there are more than this many songs, check before adding them all
+BIG_FOLDER = 200
+
+def add_folder():
+	folder = filedialog.askdirectory(initialdir=music_start_folder(), title='Choose a Folder of Songs', mustexist=True)
+	# Pressing Cancel returns an empty string (or an empty tuple on some systems)
+	if not folder:
+		return
+	status_bar.config(text='Looking for songs...  ')
+	root.update()
+	found = []
+	# os.walk goes through the folder and every folder inside it, one folder at a time
+	for here, folders, files in os.walk(folder):
+		# Sort the folders and files so songs go in by folder, then file name
+		# (most albums' file names start with the track number, so they go in track order)
+		folders.sort(key=str.lower)
+		for name in sorted(files, key=str.lower):
+			if name.lower().endswith('.mp3'):
+				found.append(os.path.join(here, name))
+	# Leave out songs that are already in the playlist
+	already = set(song_paths)
+	new_songs = []
+	for song in found:
+		if tidy_path(song) not in already:
+			new_songs.append(song)
+	skipped = len(found) - len(new_songs)
+	if not new_songs:
+		if found:
+			status_bar.config(text=f'All {len(found)} songs in that folder are already in the playlist  ')
+		else:
+			status_bar.config(text='No MP3 songs in that folder  ')
+		return
+	if len(new_songs) > BIG_FOLDER:
+		if not messagebox.askyesno('Add a Folder', f'Found {len(new_songs)} songs. Add them all?'):
+			status_bar.config(text='')
+			return
+	for count, song in enumerate(new_songs, start=1):
+		add_to_playlist(song)
+		# Reading each song's tags takes a moment, so every 20 songs update the window
+		# so it doesn't look frozen
+		if count % 20 == 0:
+			status_bar.config(text=f'Adding songs... {count} of {len(new_songs)}  ')
+			root.update()
+	word = 'song' if len(new_songs) == 1 else 'songs'
+	text = f'Added {len(new_songs)} {word} from {os.path.basename(folder)}'
+	if skipped:
+		text += f' ({skipped} already in the playlist)'
+	status_bar.config(text=text + '  ')
+
 #Add multiple songs to playlist
 def add_multiple():
 	songs = filedialog.askopenfilenames(initialdir=music_start_folder(), title="Choose Songs", filetypes=(("mp3 Files", "*.mp3"), ))
@@ -706,6 +756,10 @@ def play_pause():
 def next_track(song_finished=False):
 	if not song_paths:
 		return
+	# Sleep timer set to "End of this song" - stop instead of moving on
+	if song_finished and sleep_at_song_end:
+		sleep_now()
+		return
 	# Repeat Song - when a song finishes, play it again
 	# (the Forward button still moves on to the next song)
 	if song_finished and repeat_mode == REPEAT_SONG:
@@ -764,6 +818,66 @@ def keep_awake(on):
 		ctypes.windll.kernel32.SetThreadExecutionState(flags)
 	except Exception as e:
 		print('Could not change the sleep setting:', e)
+
+# ---------------- Sleep timer ----------------
+# Sleep Timer menu: stop the music after 15 / 30 / 45 / 60 minutes, or at the end of this song.
+# The time left shows at the bottom of the window. Over the last few seconds the music fades
+# down, then it stops - and because it's stopped, the laptop is allowed to go to sleep again.
+FADE_SECONDS = 10
+sleep_end = None            # time.time() when the music should stop (None = no timer running)
+sleep_at_song_end = False   # True when "End of this song" is chosen
+sleep_timer_id = None       # the scheduled sleep_tick, so it can be cancelled
+
+# Called by the Sleep Timer menu. sleep_choice is minutes, 0 for Off, or -1 for end of this song.
+def set_sleep_timer():
+	global sleep_end, sleep_at_song_end, sleep_timer_id
+	choice = sleep_choice.get()
+	cancel_sleep_timer()
+	if choice == 0:
+		status_bar.config(text='Sleep timer off  ')
+		return
+	if choice == -1:
+		sleep_at_song_end = True
+		sleep_label.config(text='Sleep: end of song')
+		status_bar.config(text='The music will stop at the end of this song  ')
+		return
+	sleep_end = time.time() + choice * 60
+	status_bar.config(text=f'The music will stop in {choice} minutes  ')
+	sleep_tick()
+
+# Turn the sleep timer off and put the volume back if it was fading
+def cancel_sleep_timer():
+	global sleep_end, sleep_at_song_end, sleep_timer_id
+	if sleep_timer_id is not None:
+		root.after_cancel(sleep_timer_id)
+		sleep_timer_id = None
+	sleep_end = None
+	sleep_at_song_end = False
+	sleep_label.config(text='')
+	apply_volume()
+
+# Runs twice a second while the timer is set: shows the time left, fades, then stops the music
+def sleep_tick():
+	global sleep_timer_id
+	sleep_timer_id = None
+	left = sleep_end - time.time()
+	if left <= 0:
+		sleep_now()
+		return
+	minutes, seconds = divmod(int(left) + 1, 60)
+	sleep_label.config(text=f'Sleep in {minutes}:{seconds:02d}')
+	# Fade the volume down over the last few seconds (unless muted - nothing to fade)
+	if left <= FADE_SECONDS and not muted:
+		level = float(volume_slider.get())
+		pygame.mixer.music.set_volume(level * left / FADE_SECONDS)
+	sleep_timer_id = root.after(500, sleep_tick)
+
+# Time's up - stop the music and turn the timer off
+def sleep_now():
+	stop()
+	cancel_sleep_timer()
+	sleep_choice.set(0)
+	status_bar.config(text='Sleep timer - music stopped  ')
 
 def stop():
 	global stopped, paused
@@ -1320,11 +1434,20 @@ my_menu.add_cascade(label="Add Songs", menu=add_song_menu)
 add_song_menu.add_command(label="Add one Song to playlist", command=add_song)
 # Add Multiple songs to playlist
 add_song_menu.add_command(label="Add multiple Songs to playlist", command=add_multiple)
+add_song_menu.add_command(label="Add a folder of songs...", command=add_folder)
 # Create Delete Song Menu
 remove_song_menu = Menu(my_menu)
 my_menu.add_cascade(label="Remove Songs", menu=remove_song_menu)
 remove_song_menu.add_command(label="Delete a song from playlist", command=delete_song)
 remove_song_menu.add_command(label="Delete all songs from playlist", command=delete_all_songs)
+# Sleep Timer menu - the ticked item is the one that's set
+sleep_choice = IntVar(value=0)
+sleep_menu = Menu(my_menu)
+my_menu.add_cascade(label="Sleep Timer", menu=sleep_menu)
+sleep_menu.add_radiobutton(label="Off", variable=sleep_choice, value=0, command=set_sleep_timer)
+for minutes in (15, 30, 45, 60):
+	sleep_menu.add_radiobutton(label=f"{minutes} minutes", variable=sleep_choice, value=minutes, command=set_sleep_timer)
+sleep_menu.add_radiobutton(label="End of this song", variable=sleep_choice, value=-1, command=set_sleep_timer)
 # Help menu
 help_menu = Menu(my_menu)
 my_menu.add_cascade(label="Help", menu=help_menu)
@@ -1375,6 +1498,10 @@ status_frame.pack(fill=X, side=BOTTOM)
 button_quit = Button(status_frame, text="Exit", bg="red", fg="white", activebackground="#c00000", font=("Helvetica", 10, "bold"), padx=10, pady=0, command=exit_player)
 button_quit.pack(side=LEFT, padx=4, pady=2)
 Tooltip(button_quit, 'Close the player')
+# Sleep timer countdown, next to the Exit button (blank when no timer is set)
+sleep_label = Label(status_frame, text='', fg='#b05000', font=("Helvetica", 10, "bold"))
+sleep_label.pack(side=LEFT, padx=8)
+Tooltip(sleep_label, 'Sleep timer - change or turn it off in the Sleep Timer menu')
 status_bar = Label(status_frame, text="", anchor=E)
 status_bar.pack(side=RIGHT, fill=X, expand=True, padx=4)
 
