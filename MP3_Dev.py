@@ -11,6 +11,8 @@ import eyed3
 import os
 from io import BytesIO
 import json
+import sys
+import ctypes
 from datetime import datetime, date
 from visualiser import Visualiser
 from tooltip import Tooltip
@@ -658,6 +660,8 @@ def play_song(index, start=0):
 	highlight(index)
 	current_song.config(text=read_tags(path)['title'])
 	song_info(path)
+	# Music is playing - stop the laptop going to sleep
+	keep_awake(True)
 	# Make sure only one timer is running, then start it
 	cancel_timer()
 	timer_id = root.after(1000, play_time)
@@ -732,12 +736,43 @@ def previous_song():
 	play_song(max(0, pos - 1) if pos is not None else 0)
 
 # Stop playing current song
+# ---------------- Keeping the computer awake ----------------
+# Without this, Windows puts the laptop to sleep after a while and the music stops.
+# While a song is playing we tell Windows "the system is needed" - it stays awake but the
+# screen can still switch off as normal. When the music is paused or stopped we take that
+# back, so the laptop can sleep again.
+# (Closing the laptop's lid still sends it to sleep - that's a Windows power setting.)
+# Only Windows needs this - on the Pi it does nothing.
+ES_CONTINUOUS = 0x80000000        # keep this setting until we change it
+ES_SYSTEM_REQUIRED = 0x00000001   # don't go to sleep (the screen is still allowed to turn off)
+keeping_awake = False
+
+def keep_awake(on):
+	global keeping_awake
+	if on == keeping_awake:
+		# Already set this way
+		return
+	keeping_awake = on
+	if sys.platform != 'win32':
+		return
+	if on:
+		flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+	else:
+		# ES_CONTINUOUS on its own clears the request, so normal sleep settings apply again
+		flags = ES_CONTINUOUS
+	try:
+		ctypes.windll.kernel32.SetThreadExecutionState(flags)
+	except Exception as e:
+		print('Could not change the sleep setting:', e)
+
 def stop():
 	global stopped, paused
 	cancel_timer()
 	pygame.mixer.music.stop()
 	stopped = True
 	paused = False
+	# Nothing playing, so the laptop can go to sleep again
+	keep_awake(False)
 	# Reset Slider and Status bar
 	my_slider.config(value=0)
 	status_bar.config(text='STOP')
@@ -762,9 +797,12 @@ def pause():
 	if paused:
 		pygame.mixer.music.unpause()
 		paused = False
+		keep_awake(True)
 	else:
 		pygame.mixer.music.pause()
 		paused = True
+		# Paused - let the laptop sleep if it's left like this
+		keep_awake(False)
 
 # Dragging the slider jumps to that point in the song
 def slide(x):
@@ -774,6 +812,7 @@ def slide(x):
 	seek_offset = int(my_slider.get())
 	pygame.mixer.music.play(loops=0, start=seek_offset)
 	paused = False
+	keep_awake(True)
 
 # Skip buttons - jump back (-10) or forward (+10) seconds in the song
 SKIP_SECONDS = 10
@@ -1236,6 +1275,7 @@ def restore_state():
 def exit_player():
 	if ok_to_discard():
 		remember_state()
+		keep_awake(False)
 		root.quit()
 
 # Help > Keyboard Shortcuts
