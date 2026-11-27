@@ -56,8 +56,8 @@ James's MP3 player for the Raspberry Pi, written in Python with Tkinter (window)
   Buttons and sliders have `takefocus=0` so Space doesn't click them as well.
 - `get_length()` caches lengths in `song_lengths`; `update_summary()` shows "N songs · total time".
 - Mute: `muted` flag, `apply_volume()` sets the sound from the slider + mute.
-- Sleep timer: Sleep Timer menu (radio items on `sleep_choice`: minutes, 0 = Off, -1 = end of song)
-  calls `set_sleep_timer()`. `sleep_tick()` runs twice a second, shows `sleep_label` in the status bar,
+- Sleep timer: File > Sleep Timer (radio items on `sleep_choice`: minutes, `SLEEP_OFF`, `SLEEP_END_OF_SONG`,
+  or `SLEEP_OTHER`, which asks for the minutes with `simpledialog.askinteger`) calls `set_sleep_timer()`. `sleep_tick()` runs twice a second, shows `sleep_label` in the status bar,
   fades over the last `FADE_SECONDS`, then `sleep_now()` stops. "End of song" is checked at the top
   of `next_track()`.
 - `add_folder()` (Add Songs > Add a folder of songs) walks a folder and its subfolders for .mp3 files,

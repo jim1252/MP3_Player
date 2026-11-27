@@ -3,6 +3,7 @@ from PIL import ImageTk,Image
 import pygame
 from tkinter import filedialog
 from tkinter import messagebox
+from tkinter import simpledialog
 import time
 from mutagen.mp3 import MP3
 import tkinter.ttk as ttk
@@ -828,21 +829,44 @@ sleep_end = None            # time.time() when the music should stop (None = no 
 sleep_at_song_end = False   # True when "End of this song" is chosen
 sleep_timer_id = None       # the scheduled sleep_tick, so it can be cancelled
 
-# Called by the Sleep Timer menu. sleep_choice is minutes, 0 for Off, or -1 for end of this song.
+# Values of sleep_choice that aren't a number of minutes
+SLEEP_OFF = 0
+SLEEP_END_OF_SONG = -1
+SLEEP_OTHER = -2            # "Other time..." - you type the minutes
+OTHER_TIME_LABEL = 'Other time...'
+# Longest time you can type in for "Other time..." (in minutes - 600 is 10 hours)
+MOST_SLEEP_MINUTES = 600
+# What the menu was set to before, so pressing Cancel on "Other time..." can put it back
+last_sleep_choice = SLEEP_OFF
+
+# Called by File > Sleep Timer. sleep_choice is a number of minutes, or one of the values above.
 def set_sleep_timer():
-	global sleep_end, sleep_at_song_end, sleep_timer_id
+	global sleep_end, sleep_at_song_end, last_sleep_choice
 	choice = sleep_choice.get()
+	if choice == SLEEP_OTHER:
+		minutes = simpledialog.askinteger('Sleep Timer', f'Stop the music after how many minutes? (1 to {MOST_SLEEP_MINUTES})',
+			parent=root, minvalue=1, maxvalue=MOST_SLEEP_MINUTES)
+		if minutes is None:
+			# Cancel - leave the timer as it was and put the tick back where it was
+			sleep_choice.set(last_sleep_choice)
+			return
+		# Show the time that was typed in the menu, e.g. "Other time... (90 minutes)"
+		sleep_menu.entryconfig(OTHER_TIME_LABEL_INDEX, label=f'{OTHER_TIME_LABEL} ({minutes} minutes)')
+	else:
+		minutes = choice
+		sleep_menu.entryconfig(OTHER_TIME_LABEL_INDEX, label=OTHER_TIME_LABEL)
+	last_sleep_choice = choice
 	cancel_sleep_timer()
-	if choice == 0:
+	if choice == SLEEP_OFF:
 		status_bar.config(text='Sleep timer off  ')
 		return
-	if choice == -1:
+	if choice == SLEEP_END_OF_SONG:
 		sleep_at_song_end = True
 		sleep_label.config(text='Sleep: end of song')
 		status_bar.config(text='The music will stop at the end of this song  ')
 		return
-	sleep_end = time.time() + choice * 60
-	status_bar.config(text=f'The music will stop in {choice} minutes  ')
+	sleep_end = time.time() + minutes * 60
+	status_bar.config(text=f'The music will stop in {minutes} minutes  ')
 	sleep_tick()
 
 # Turn the sleep timer off and put the volume back if it was fading
@@ -874,9 +898,12 @@ def sleep_tick():
 
 # Time's up - stop the music and turn the timer off
 def sleep_now():
+	global last_sleep_choice
 	stop()
 	cancel_sleep_timer()
-	sleep_choice.set(0)
+	sleep_choice.set(SLEEP_OFF)
+	last_sleep_choice = SLEEP_OFF
+	sleep_menu.entryconfig(OTHER_TIME_LABEL_INDEX, label=OTHER_TIME_LABEL)
 	status_bar.config(text='Sleep timer - music stopped  ')
 
 def stop():
@@ -1415,6 +1442,17 @@ settings_menu = Menu(file_menu)
 file_menu.add_cascade(label="Settings", menu=settings_menu)
 settings_menu.add_command(label="Set Music Folder...", command=set_music_folder)
 settings_menu.add_command(label="Set Playlist Folder...", command=set_playlist_folder)
+# File > Sleep Timer - the ticked item is the one that's set
+sleep_choice = IntVar(value=0)
+sleep_menu = Menu(file_menu)
+file_menu.add_cascade(label="Sleep Timer", menu=sleep_menu)
+sleep_menu.add_radiobutton(label="Off", variable=sleep_choice, value=0, command=set_sleep_timer)
+for minutes in (15, 30, 45, 60):
+	sleep_menu.add_radiobutton(label=f"{minutes} minutes", variable=sleep_choice, value=minutes, command=set_sleep_timer)
+sleep_menu.add_radiobutton(label=OTHER_TIME_LABEL, variable=sleep_choice, value=SLEEP_OTHER, command=set_sleep_timer)
+# Remember where "Other time..." is in the menu, so its label can show the minutes typed in
+OTHER_TIME_LABEL_INDEX = sleep_menu.index(END)
+sleep_menu.add_radiobutton(label="End of this song", variable=sleep_choice, value=SLEEP_END_OF_SONG, command=set_sleep_timer)
 file_menu.add_separator()
 file_menu.add_command(label="Exit...", command=exit_player)
 # Playlist menu - save and open playlists
@@ -1440,14 +1478,6 @@ remove_song_menu = Menu(my_menu)
 my_menu.add_cascade(label="Remove Songs", menu=remove_song_menu)
 remove_song_menu.add_command(label="Delete a song from playlist", command=delete_song)
 remove_song_menu.add_command(label="Delete all songs from playlist", command=delete_all_songs)
-# Sleep Timer menu - the ticked item is the one that's set
-sleep_choice = IntVar(value=0)
-sleep_menu = Menu(my_menu)
-my_menu.add_cascade(label="Sleep Timer", menu=sleep_menu)
-sleep_menu.add_radiobutton(label="Off", variable=sleep_choice, value=0, command=set_sleep_timer)
-for minutes in (15, 30, 45, 60):
-	sleep_menu.add_radiobutton(label=f"{minutes} minutes", variable=sleep_choice, value=minutes, command=set_sleep_timer)
-sleep_menu.add_radiobutton(label="End of this song", variable=sleep_choice, value=-1, command=set_sleep_timer)
 # Help menu
 help_menu = Menu(my_menu)
 my_menu.add_cascade(label="Help", menu=help_menu)
