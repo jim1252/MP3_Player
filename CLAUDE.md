@@ -56,6 +56,9 @@ James's MP3 player for the Raspberry Pi, written in Python with Tkinter (window)
   Buttons and sliders have `takefocus=0` so Space doesn't click them as well.
 - `get_length()` caches lengths in `song_lengths`; `update_summary()` shows "N songs · total time".
 - Mute: `muted` flag, `apply_volume()` sets the sound from the slider + mute.
+- Stay awake: `keep_awake(True/False)` - on Windows it calls `SetThreadExecutionState` so the laptop
+  doesn't sleep while music plays (the screen can still turn off). Switched on in `play_song()`,
+  resume and `slide()`; off in `pause()`, `stop()` and `exit_player()`. Does nothing on the Pi.
 - Play history: `play_time()` calls `listened_a_second()`, which adds up real listening time
   (seeking doesn't count). After `COUNT_AFTER_SECONDS` (30), or half a shorter song,
   `count_play(path)` adds one, saves `play_history.json` and updates the table.
